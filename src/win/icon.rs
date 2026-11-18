@@ -83,7 +83,7 @@ pub struct IconRenderer {
     icon_font: &'static str,
 }
 
-fn has_family(dwrite: &IDWriteFactory, name: &str) -> bool {
+pub(super) fn has_family(dwrite: &IDWriteFactory, name: &str) -> bool {
     let mut coll = None;
     // SAFETY: out-pointers are valid locals.
     unsafe {
@@ -98,7 +98,7 @@ fn has_family(dwrite: &IDWriteFactory, name: &str) -> bool {
     }
 }
 
-fn color_f(c: Rgb, a: f32) -> D2D1_COLOR_F {
+pub(super) fn color_f(c: Rgb, a: f32) -> D2D1_COLOR_F {
     D2D1_COLOR_F {
         r: c.r as f32 / 255.0,
         g: c.g as f32 / 255.0,

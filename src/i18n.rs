@@ -36,7 +36,16 @@ pub enum Key {
     MenuRescan,
     MenuSettings,
     MenuStartWithWindows,
+    MenuInternalDisplay,
     MenuExit,
+    MenuCheckUpdates,
+    /// Menu item to install a found update; `{}` is the version.
+    MenuUpdateTo,
+    /// Update balloons; `{}` is the version (or the error for `UpdateFailed`).
+    UpdateAvailable,
+    UpToDate,
+    UpdateFailed,
+    Updated,
     /// Tooltip suffix for a monitor that doesn't answer.
     Unresponsive,
     /// Tooltip suffix for a monitor that rejects writes.
@@ -66,7 +75,14 @@ const ALL_KEYS: &[Key] = &[
     Key::MenuRescan,
     Key::MenuSettings,
     Key::MenuStartWithWindows,
+    Key::MenuInternalDisplay,
     Key::MenuExit,
+    Key::MenuCheckUpdates,
+    Key::MenuUpdateTo,
+    Key::UpdateAvailable,
+    Key::UpToDate,
+    Key::UpdateFailed,
+    Key::Updated,
     Key::Unresponsive,
     Key::ReadOnly,
     Key::ReadOnlyHint,
@@ -80,6 +96,11 @@ const ALL_KEYS: &[Key] = &[
     Key::LinkAll,
 ];
 
+/// `tr` for a template: `{}` is replaced by `arg`.
+pub fn tr_with(lang: Lang, key: Key, arg: &str) -> String {
+    tr(lang, key).replace("{}", arg)
+}
+
 pub fn tr(lang: Lang, key: Key) -> &'static str {
     match lang {
         Lang::En => match key {
@@ -87,7 +108,14 @@ pub fn tr(lang: Lang, key: Key) -> &'static str {
             Key::MenuRescan => "Rescan monitors",
             Key::MenuSettings => "Settings",
             Key::MenuStartWithWindows => "Start with Windows",
+            Key::MenuInternalDisplay => "Control built-in display",
             Key::MenuExit => "Exit",
+            Key::MenuCheckUpdates => "Check for updates",
+            Key::MenuUpdateTo => "Update to {}",
+            Key::UpdateAvailable => "Nitor {} is available",
+            Key::UpToDate => "You're up to date ({})",
+            Key::UpdateFailed => "Update failed: {}",
+            Key::Updated => "Updated to {}",
             Key::Unresponsive => "not responding",
             Key::ReadOnly => "read-only",
             Key::ReadOnlyHint => {
@@ -113,7 +141,14 @@ pub fn tr(lang: Lang, key: Key) -> &'static str {
             Key::MenuRescan => "Rileva monitor",
             Key::MenuSettings => "Impostazioni",
             Key::MenuStartWithWindows => "Avvia con Windows",
+            Key::MenuInternalDisplay => "Controlla schermo integrato",
             Key::MenuExit => "Esci",
+            Key::MenuCheckUpdates => "Controlla aggiornamenti",
+            Key::MenuUpdateTo => "Aggiorna a {}",
+            Key::UpdateAvailable => "È disponibile Nitor {}",
+            Key::UpToDate => "Nitor è aggiornato ({})",
+            Key::UpdateFailed => "Aggiornamento non riuscito: {}",
+            Key::Updated => "Aggiornato a {}",
             Key::Unresponsive => "non risponde",
             Key::ReadOnly => "sola lettura",
             Key::ReadOnlyHint => {
@@ -153,9 +188,19 @@ mod tests {
     }
 
     #[test]
-    fn hotkey_conflict_keeps_placeholder() {
+    fn templates_keep_placeholder() {
+        let templates = [
+            Key::HotkeyConflict,
+            Key::MenuUpdateTo,
+            Key::UpdateAvailable,
+            Key::UpToDate,
+            Key::UpdateFailed,
+            Key::Updated,
+        ];
         for lang in [Lang::En, Lang::It] {
-            assert!(tr(lang, Key::HotkeyConflict).contains("{}"));
+            for key in templates {
+                assert!(tr(lang, key).contains("{}"), "{lang:?} {key:?}");
+            }
         }
     }
 

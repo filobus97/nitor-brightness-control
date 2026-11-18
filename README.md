@@ -4,7 +4,7 @@ Nitor is a lightweight, easy-to-use brightness control for external monitors on 
 
 It's a single portable `.exe` that sits in the notification area with **one tray icon per monitor**, each showing that monitor's brightness as a number in its own color. **Scroll over an icon** to change that monitor's brightness. Hardware brightness is set over DDC/CI, the same way the monitor's own buttons do it.
 
-- One small native exe: no installer, no runtime, no admin rights, no network, no telemetry.
+- One small native exe: no installer, no runtime, no admin rights, no telemetry. The only network use is the update check (see [Updates](#updates)).
 - Brightness only, done well. No overlays or gamma tricks.
 - Windows 10 (1809+) and Windows 11, x64 and ARM64.
 - English and Italian, following the Windows display language.
@@ -23,7 +23,12 @@ Windows 11 hides new tray icons in the overflow menu. To keep Nitor's icons visi
 |---|---|
 | Mouse wheel over an icon | Brightness ± step (default 5) |
 | Shift + wheel | ± 1 |
-| Right click | Rescan monitors · Settings · Start with Windows · Exit |
+| Left click | Flyout with one slider per monitor; click a color dot to change that monitor's color |
+| Right click | Rescan monitors · Settings · Start with Windows · Control built-in display (laptops) · Exit |
+
+**Link all** (in the flyout footer) adds a master slider that moves every monitor together. Each monitor's slider then shows two small handles: drag them to set the range that monitor follows, so screens with different panels look equally bright.
+
+**Laptops:** the built-in screen is left alone by default. Enable **Control built-in display** in the tray menu to get an icon and slider for it too.
 
 ### Command line
 
@@ -42,6 +47,10 @@ Commands are sent to the running instance; if Nitor isn't running, it starts.
 ### Configuration
 
 Settings live in `Nitor.ini`, next to the exe when that folder is writable, otherwise in `%APPDATA%\Nitor\`. **Settings** in the tray menu opens it. See [`docs/SPEC.md` §10](docs/SPEC.md#10-configuration-and-portability) for all options.
+
+## Updates
+
+Nitor checks GitHub Releases for a newer version at startup and then at most once a day, and tells you with a tray notification. It never installs anything on its own: choose **Update to x.y.z** in the tray menu to download the new exe, verify its SHA-256 checksum, replace itself and restart. **Check for updates** in the menu checks on demand. The only data sent is a `Nitor/<version>` user agent; nothing else leaves your PC. To turn the automatic check off, set `check_updates = false` in `Nitor.ini`. If Nitor's folder isn't writable, the menu item opens the release page instead.
 
 ## Monitors that don't respond
 

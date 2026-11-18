@@ -19,14 +19,22 @@ pub struct General {
     pub wheel_step: u8,
     pub single_icon_mode: bool,
     pub refresh_on_open: bool,
+    /// Flyout "Link all" toggle.
+    pub linked: bool,
     pub osd: bool,
     pub write_interval_ms: u32,
     pub rescan_delay_ms: u32,
     pub autostart: bool,
+    /// Also control the laptop's built-in display (through WMI).
+    pub internal_display: bool,
     /// `auto`, `en`, `it`.
     pub language: String,
     /// Set once the first-run pinning hint was shown.
     pub hint_shown: bool,
+    /// Check GitHub Releases for a newer version (at startup, then every 24 h).
+    pub check_updates: bool,
+    /// Unix seconds of the last automatic update check.
+    pub last_update_check: u64,
     /// Stable IDs being probed; non-empty at startup means the last probe crashed (§7.4).
     pub detection_in_progress: Vec<String>,
 }
@@ -38,12 +46,16 @@ impl Default for General {
             wheel_step: 5,
             single_icon_mode: false,
             refresh_on_open: true,
+            linked: false,
             osd: false,
             write_interval_ms: 80,
             rescan_delay_ms: 2000,
             autostart: false,
+            internal_display: false,
             language: "auto".into(),
             hint_shown: false,
+            check_updates: true,
+            last_update_check: 0,
             detection_in_progress: Vec::new(),
         }
     }
@@ -59,6 +71,9 @@ pub struct MonitorSettings {
     pub step: Option<u8>,
     pub min: u8,
     pub max: u8,
+    /// Calibrated range the flyout's linked master slider maps onto (0..=100).
+    pub link_min: u8,
+    pub link_max: u8,
     pub badge: Option<char>,
     /// Hidden from the tray.
     pub hidden: bool,
@@ -73,6 +88,8 @@ impl Default for MonitorSettings {
             step: None,
             min: 0,
             max: 100,
+            link_min: 0,
+            link_max: 100,
             badge: None,
             hidden: false,
         }
@@ -188,15 +205,19 @@ impl Config {
         o += &format!("wheel_step = {}\n", g.wheel_step);
         o += &format!("single_icon_mode = {}\n", g.single_icon_mode);
         o += &format!("refresh_on_open = {}\n", g.refresh_on_open);
+        o += &format!("linked = {}\n", g.linked);
         o += &format!("osd = {}\n", g.osd);
         o += &format!("write_interval_ms = {}\n", g.write_interval_ms);
         o += &format!("rescan_delay_ms = {}\n", g.rescan_delay_ms);
         o += &format!("autostart = {}\n", g.autostart);
+        o += &format!("internal_display = {}\n", g.internal_display);
         o += &format!(
             "language = {}          ; auto | en | it\n",
             one_line(&g.language)
         );
         o += &format!("hint_shown = {}\n", g.hint_shown);
+        o += &format!("check_updates = {}\n", g.check_updates);
+        o += &format!("last_update_check = {}\n", g.last_update_check);
         o += &format!(
             "detection_in_progress = {}\n",
             one_line(&g.detection_in_progress.join(","))
@@ -220,6 +241,12 @@ impl Config {
             }
             if m.max != 100 {
                 o += &format!("max = {}\n", m.max);
+            }
+            if m.link_min != 0 {
+                o += &format!("link_min = {}\n", m.link_min);
+            }
+            if m.link_max != 100 {
+                o += &format!("link_max = {}\n", m.link_max);
             }
             if let Some(b) = m.badge {
                 o += &format!("badge = {}\n", one_line(&b.to_string()));
@@ -276,6 +303,7 @@ impl General {
             }
             "single_icon_mode" => self.single_icon_mode = parse_bool(v, d.single_icon_mode),
             "refresh_on_open" => self.refresh_on_open = parse_bool(v, d.refresh_on_open),
+            "linked" => self.linked = parse_bool(v, d.linked),
             "osd" => self.osd = parse_bool(v, d.osd),
             "write_interval_ms" => {
                 self.write_interval_ms = parse_num::<u32>(v)
@@ -284,6 +312,7 @@ impl General {
             }
             "rescan_delay_ms" => self.rescan_delay_ms = parse_num(v).unwrap_or(d.rescan_delay_ms),
             "autostart" => self.autostart = parse_bool(v, d.autostart),
+            "internal_display" => self.internal_display = parse_bool(v, d.internal_display),
             "language" => {
                 self.language = if v.is_empty() {
                     d.language
@@ -292,6 +321,8 @@ impl General {
                 }
             }
             "hint_shown" => self.hint_shown = parse_bool(v, d.hint_shown),
+            "check_updates" => self.check_updates = parse_bool(v, d.check_updates),
+            "last_update_check" => self.last_update_check = parse_num(v).unwrap_or(0),
             "detection_in_progress" => {
                 self.detection_in_progress = v
                     .split(',')
@@ -314,12 +345,17 @@ impl MonitorSettings {
             "step" => self.step = parse_num::<u8>(v).map(|s| s.clamp(1, 25)),
             "min" => self.min = parse_num::<u8>(v).unwrap_or(0).min(100),
             "max" => self.max = parse_num::<u8>(v).unwrap_or(100).min(100),
+            "link_min" => self.link_min = parse_num::<u8>(v).unwrap_or(0).min(100),
+            "link_max" => self.link_max = parse_num::<u8>(v).unwrap_or(100).min(100),
             "badge" => self.badge = v.chars().next(),
             "hidden" => self.hidden = parse_bool(v, false),
             _ => return,
         }
         if self.min > self.max {
             std::mem::swap(&mut self.min, &mut self.max);
+        }
+        if self.link_min > self.link_max {
+            std::mem::swap(&mut self.link_min, &mut self.link_max);
         }
     }
 }
@@ -358,9 +394,13 @@ mod tests {
         c.general.tray_style = TrayStyle::Pill;
         c.general.wheel_step = 10;
         c.general.osd = true;
+        c.general.internal_display = true;
+        c.general.linked = true;
         c.general.refresh_on_open = false;
         c.general.write_interval_ms = 150;
         c.general.language = "it".into();
+        c.general.check_updates = false;
+        c.general.last_update_check = 1_700_000_000;
         c.general.detection_in_progress = vec!["DEL41D9-ABC#1".into(), "A&B-2".into()];
         c.monitors.insert(
             "DEL41D9-ABC123".into(),
@@ -371,6 +411,8 @@ mod tests {
                 step: Some(2),
                 min: 10,
                 max: 90,
+                link_min: 20,
+                link_max: 80,
                 badge: Some('D'),
                 hidden: true,
             },

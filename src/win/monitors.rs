@@ -3,10 +3,13 @@
 use std::collections::HashMap;
 use windows::Win32::Devices::Display::{
     DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME, DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME,
-    DISPLAYCONFIG_MODE_INFO, DISPLAYCONFIG_PATH_INFO, DISPLAYCONFIG_SOURCE_DEVICE_NAME,
-    DISPLAYCONFIG_TARGET_DEVICE_NAME, DestroyPhysicalMonitor, DisplayConfigGetDeviceInfo,
-    GetDisplayConfigBufferSizes, GetNumberOfPhysicalMonitorsFromHMONITOR,
-    GetPhysicalMonitorsFromHMONITOR, PHYSICAL_MONITOR, QDC_ONLY_ACTIVE_PATHS, QueryDisplayConfig,
+    DISPLAYCONFIG_MODE_INFO, DISPLAYCONFIG_OUTPUT_TECHNOLOGY_DISPLAYPORT_EMBEDDED,
+    DISPLAYCONFIG_OUTPUT_TECHNOLOGY_INTERNAL, DISPLAYCONFIG_OUTPUT_TECHNOLOGY_LVDS,
+    DISPLAYCONFIG_OUTPUT_TECHNOLOGY_UDI_EMBEDDED, DISPLAYCONFIG_PATH_INFO,
+    DISPLAYCONFIG_SOURCE_DEVICE_NAME, DISPLAYCONFIG_TARGET_DEVICE_NAME, DestroyPhysicalMonitor,
+    DisplayConfigGetDeviceInfo, GetDisplayConfigBufferSizes,
+    GetNumberOfPhysicalMonitorsFromHMONITOR, GetPhysicalMonitorsFromHMONITOR, PHYSICAL_MONITOR,
+    QDC_ONLY_ACTIVE_PATHS, QueryDisplayConfig,
 };
 use windows::Win32::Foundation::{ERROR_SUCCESS, HANDLE, LPARAM, RECT};
 use windows::Win32::Graphics::Gdi::{
@@ -56,6 +59,8 @@ pub struct FoundMonitor {
     pub rect: RECT,
     /// `None` if Windows gave no physical handle (not controllable).
     pub handle: Option<PhysicalHandle>,
+    /// Built-in panel (laptop display): reachable through WMI instead of DDC/CI.
+    pub internal: bool,
 }
 
 /// What DisplayConfig knows about one active path's target.
@@ -65,6 +70,7 @@ struct Target {
     device_path: String,
     edid_mfg: u16,
     edid_prod: u16,
+    internal: bool,
 }
 
 fn from_wide(w: &[u16]) -> String {
@@ -128,6 +134,13 @@ fn query_targets() -> Vec<Target> {
             device_path: from_wide(&tgt.monitorDevicePath),
             edid_mfg: tgt.edidManufactureId,
             edid_prod: tgt.edidProductCodeId,
+            internal: matches!(
+                p.targetInfo.outputTechnology,
+                DISPLAYCONFIG_OUTPUT_TECHNOLOGY_INTERNAL
+                    | DISPLAYCONFIG_OUTPUT_TECHNOLOGY_DISPLAYPORT_EMBEDDED
+                    | DISPLAYCONFIG_OUTPUT_TECHNOLOGY_UDI_EMBEDDED
+                    | DISPLAYCONFIG_OUTPUT_TECHNOLOGY_LVDS
+            ),
         });
     }
     out
@@ -346,6 +359,7 @@ pub fn enumerate() -> Vec<FoundMonitor> {
                 hmonitor: hmon,
                 rect,
                 handle,
+                internal: target.is_some_and(|t| t.internal),
             });
         }
     }

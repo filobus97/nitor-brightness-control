@@ -9,7 +9,9 @@ pub mod color;
 pub mod config;
 pub mod hotkey;
 pub mod i18n;
+pub mod link;
 pub mod throttle;
+pub mod update;
 
 #[cfg(windows)]
 pub mod win;

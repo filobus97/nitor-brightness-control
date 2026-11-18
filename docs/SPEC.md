@@ -14,7 +14,7 @@
 
 Nitor is a single portable `.exe` that lives in the Windows notification area. It shows **one tray icon per external monitor**. Each icon displays that monitor's current **hardware backlight brightness as a number**, in a **user-chosen color per monitor**. Scrolling the mouse wheel over an icon adjusts that monitor. Clicking an icon opens a Windows 11–style flyout with one slider per monitor.
 
-It controls **brightness only**. It needs no installer, no admin rights, no runtime, no network access and no telemetry.
+It controls **brightness only**. It needs no installer, no admin rights, no runtime and no admin rights. It uses the network only to check GitHub Releases for updates (opt-out, §10) and never for anything else; no telemetry.
 
 ---
 
@@ -47,14 +47,14 @@ Windows has no built-in brightness control for external monitors. The author has
 - **G1**: Per-monitor tray icons rendering brightness (0–100) in a per-monitor color.
 - **G2**: Mouse wheel over a tray icon adjusts that monitor.
 - **G3**: A flyout that looks native on Windows 11 and acceptable on Windows 10.
-- **G4**: Portable: one exe, runs from any folder, writes only its config file.
+- **G4**: Portable: one exe, runs from any folder, writes only its config file (and, during an update, the new exe next to itself).
 - **G5**: Global hotkeys and a CLI with ClickMonitorDDC-flavored brightness syntax.
 - **G6**: Safe DDC/CI behavior: no write floods, no risky probes, minimal EEPROM writes.
 
 ### Non-goals
 - Volume, contrast, color temperature, input switching, power state.
 - Software dimming (overlays, gamma ramps).
-- Auto-update, an installer, the Microsoft Store, telemetry.
+- An installer, the Microsoft Store, telemetry. Updates are never installed without a click (§10).
 - Linux and macOS in this project (GNOME and KDE handle DDC brightness natively). The platform-independent logic lives outside `src/win/` so a future sibling project (e.g. `nitor-hyprland`) can reuse it.
 
 ---
@@ -127,8 +127,8 @@ The wheel step is fixed by Nitor's setting, independent of the Windows "lines pe
 - Off by default. Suppressed when a fullscreen app is in the foreground (`SHQueryUserNotificationState`).
 
 ### 4.7 Linked brightness (P1)
-- "Link all" adds a master slider moving all monitors together.
-- Per-monitor calibration curve (up to 5 points). Monitors can be excluded.
+- "Link all" adds a master slider (0–100) moving all monitors together.
+- Per-monitor calibration range: the master value maps linearly into `link_min..=link_max`, so panels of different brightness can be matched (e.g. Dell 20–80, LG 0–100). While linked, each monitor's slider shows two handles to calibrate its range. The per-monitor `min`/`max` clamp still applies afterwards.
 
 ### 4.8 Schedule (P2)
 - ClickMonitorDDC semantics: each rule fires once per day, e.g. `07:00 all b 30`.
@@ -179,6 +179,7 @@ The wheel step is fixed by Nitor's setting, independent of the Windows "lines pe
 | `src/win/tray.rs` | `Shell_NotifyIcon` wrappers |
 | `src/win/instance.rs` | Single instance + argument forwarding |
 | `src/win/autostart.rs` | `HKCU\...\Run` entry |
+| `src/update.rs`, `src/win/update.rs` | Release lookup and self-update: version/JSON/checksum logic (portable) and WinHTTP + CNG + file swap |
 
 ---
 
@@ -207,6 +208,8 @@ The wheel step is fixed by Nitor's setting, independent of the Windows "lines pe
 ---
 
 ## 8. Monitor discovery and identity
+
+**Built-in laptop panels** don't speak DDC/CI. They are detected via the DisplayConfig output technology (internal/embedded) and, only when `internal_display = true` (tray menu: "Control built-in display", shown only on laptops), controlled through WMI (`root\WMI`: `WmiMonitorBrightness`, `WmiSetBrightness`) by the same worker/throttle logic. Changes made with Fn keys or Quick Settings are picked up through the `GUID_VIDEO_CURRENT_MONITOR_BRIGHTNESS` power notification, without polling.
 
 1. `EnumDisplayMonitors` → `MONITORINFOEX.szDevice`.
 2. `QueryDisplayConfig` + `DisplayConfigGetDeviceInfo` → friendly name and device path.
@@ -238,6 +241,10 @@ The shell never forwards `WM_MOUSEWHEEL` to a tray icon's callback window.
 - **Autostart**: `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, written only when enabled; a stale path is fixed on launch.
 - **Single instance**: named mutex; a second launch forwards its arguments via `WM_COPYDATA` and exits.
 - **Explorer restarts**: icons re-added on `TaskbarCreated`.
+- **Updates**: Nitor checks the latest GitHub release quietly in a background thread after the first probe, then at most every 24 h (an hourly timer tests whether 24 h passed, so sleep is handled). `[general] check_updates = false` turns automatic checks off; `last_update_check` (Unix seconds) records the last automatic check. When a newer version exists, a tray balloon announces it once per version and session and the tray menu gains "Update to <version>". Installing always needs that click. "Check for updates" in the menu checks on demand, also when `check_updates` is off, and reports the result by balloon.
+  - **Network**: HTTPS to `api.github.com` and the release download host only, via WinHTTP, sending just `User-Agent: Nitor/<version>`. Prereleases (tags containing `-`) are ignored by `releases/latest`.
+  - **Install**: download `Nitor-x64.exe` or `Nitor-arm64.exe` and `SHA256SUMS.txt` into `<exe>.new`, verify SHA-256 (Windows CNG), delete a stale `<exe>.old`, rename the running exe to `<exe>.old`, rename `<exe>.new` to `<exe>`; on failure roll back, delete `.new`, show "Update failed" and open the release page. If the exe's folder is not writable, only the release page is opened.
+  - **Restart**: the old process starts the new exe with `--after-update <pid>` and exits normally. The new process waits up to 10 s for that pid before the single-instance check, then shows "Updated to <version>". At every startup `<exe>.old` is deleted if present (errors ignored).
 - **Signing**: unsigned for now (SmartScreen warns on first run).
 
 ### Example `Nitor.ini`
@@ -252,6 +259,10 @@ write_interval_ms = 80
 rescan_delay_ms = 2000
 autostart = true
 language = auto            ; auto | en | it
+internal_display = false   ; also control the laptop's built-in screen
+linked = false             ; "Link all" in the flyout
+check_updates = true       ; check GitHub Releases at startup and every 24 h
+last_update_check = 0      ; Unix seconds, written by Nitor
 
 [monitor.DEL41D9-ABC123]
 alias = Dell
@@ -260,6 +271,8 @@ order = 1
 min = 0
 max = 100
 badge = D
+link_min = 20              ; calibrated range used by "Link all"
+link_max = 80
 
 [hotkeys]
 Ctrl+Alt+PgUp   = all +10
@@ -318,10 +331,10 @@ target := alias | name-substring | serial | #index | all | cursor
 | ID | Scope | Exit criterion |
 |---|---|---|
 | **M1** | Core logic, DDC workers, numbered per-monitor tray icons with colors, wheel hook, right-click menu, single instance, config, autostart, CLI, CI + release pipeline | Usable daily driver |
-| **M2** | Fluent flyout: theming, DPI, color picker, link all | Visual parity with the spec |
+| **M2** | Fluent flyout: theming, DPI, color picker, calibrated link all; opt-in built-in laptop panel (WMI) | Visual parity with the spec |
 | **M3** | Hotkeys, OSD, config hot-reload, single-icon mode | ClickMonitorDDC replacement complete |
 | **M4** | Hardening: hot-plug, sleep, docks, 16 px legibility pass | Stable for 2 weeks of daily use |
-| **M5** *(optional)* | Schedule, calibration curves, internal laptop panel via WMI | — |
+| **M5** *(optional)* | Schedule, multi-point calibration curves | — |
 
 ---
 
@@ -335,7 +348,7 @@ target := alias | name-substring | serial | #index | all | cursor
 ## 17. Decisions (formerly open questions)
 
 1. **Windows 10 and 11** are both supported (Windows 10 gets the simple visual fallback).
-2. **External monitors only** for now; the internal laptop panel is an optional M5 item.
+2. **External monitors by default**; the built-in laptop panel is opt-in (`internal_display`, or the tray menu).
 3. **No hotkeys bound by default.**
 4. **English and Italian**, picked from the Windows UI language (`language = auto`), with a string table that makes adding languages easy.
 5. **GPL-3.0-or-later.**
