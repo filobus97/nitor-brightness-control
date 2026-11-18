@@ -44,13 +44,15 @@ Examples: `Nitor.exe b 50`, `Nitor.exe Dell b +10 LG b 30`, `Nitor.exe all b -20
 
 Commands are sent to the running instance; if Nitor isn't running, it starts.
 
-### Configuration
+### Settings
 
-Settings live in `Nitor.ini`, next to the exe when that folder is writable, otherwise in `%APPDATA%\Nitor\`. **Settings** in the tray menu opens it. See [`docs/SPEC.md` §10](docs/SPEC.md#10-configuration-and-portability) for all options.
+**Settings** in the tray menu (or the gear in the flyout) opens a window with everything you can change: start with Windows, language, update checks, tray icon style and wheel step, and per monitor the color, name, badge, whether it shows in the tray, its brightness limits and its position in the tray. Changes apply immediately.
+
+For power users everything is also in `Nitor.ini`, next to the exe when that folder is writable, otherwise in `%APPDATA%\Nitor\`; **Open config file** in the Settings window opens it. It also holds the options without a screen (hotkeys, schedule). Nitor reads it again on **Rescan monitors**. See [`docs/SPEC.md` §10](docs/SPEC.md#10-configuration-and-portability) for all options.
 
 ## Updates
 
-Nitor checks GitHub Releases for a newer version at startup and then at most once a day, and tells you with a tray notification. It never installs anything on its own: choose **Update to x.y.z** in the tray menu to download the new exe, verify its SHA-256 checksum, replace itself and restart. **Check for updates** in the menu checks on demand. The only data sent is a `Nitor/<version>` user agent; nothing else leaves your PC. To turn the automatic check off, set `check_updates = false` in `Nitor.ini`. If Nitor's folder isn't writable, the menu item opens the release page instead.
+Nitor checks GitHub Releases for a newer version at startup and then at most once a day, and tells you with a tray notification. It never installs anything on its own: choose **Update to x.y.z** in the tray menu to download the new exe, verify its SHA-256 checksum, replace itself and restart. **Check for updates** in the menu checks on demand. The only data sent is a `Nitor/<version>` user agent; nothing else leaves your PC. To turn the automatic check off, untick **Check for updates automatically** in Settings (`check_updates = false` in `Nitor.ini`). If Nitor's folder isn't writable, the menu item opens the release page instead.
 
 ## Monitors that don't respond
 

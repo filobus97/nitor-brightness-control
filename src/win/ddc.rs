@@ -48,8 +48,9 @@ fn lock(m: &Mutex<State>) -> MutexGuard<'_, State> {
 pub enum Backend {
     /// External monitor over DDC/CI; the worker owns the handle.
     Ddc(PhysicalHandle),
-    /// Built-in display through WMI (percent scale, max 100).
-    Wmi,
+    /// Built-in display through WMI (percent scale, max 100). The WMI `InstanceName` of
+    /// the panel, or `None` for the first active one.
+    Wmi(Option<String>),
 }
 
 pub struct DdcWorker {
@@ -182,10 +183,10 @@ impl Panel {
     fn open(backend: Backend) -> Panel {
         match backend {
             Backend::Ddc(h) => Panel::Ddc(h),
-            Backend::Wmi => {
+            Backend::Wmi(instance) => {
                 // SAFETY: once per worker thread, which never uninitializes COM.
                 let _ = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
-                Panel::Wmi(Wmi::connect().ok())
+                Panel::Wmi(Wmi::connect(instance))
             }
         }
     }

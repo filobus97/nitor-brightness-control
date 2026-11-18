@@ -26,7 +26,7 @@ use windows::Win32::Graphics::Direct2D::*;
 use windows::Win32::Graphics::DirectWrite::*;
 use windows::Win32::Graphics::Dwm::{
     DWMSBT_TRANSIENTWINDOW, DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_USE_IMMERSIVE_DARK_MODE,
-    DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND, DwmExtendFrameIntoClientArea,
+    DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND, DWMWINDOWATTRIBUTE, DwmExtendFrameIntoClientArea,
     DwmSetWindowAttribute,
 };
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_UNKNOWN;
@@ -118,6 +118,18 @@ pub fn show(anchor: POINT, rows: Vec<FlyoutRow>, linked: bool, lang: Lang) {
 /// New values/colors while open. Does not disturb a drag in progress.
 pub fn update(rows: Vec<FlyoutRow>) {
     if with_state(|st| st.visible && st.merge(rows)) == Some(true) {
+        refresh_window();
+    }
+}
+
+/// The system theme changed: re-read it and restyle (also while open).
+pub fn retheme() {
+    let visible = with_state(|st| {
+        st.theme = Theme::read();
+        st.apply_theme();
+        st.visible
+    });
+    if visible == Some(true) {
         refresh_window();
     }
 }
@@ -633,14 +645,22 @@ impl State {
             right: anchor.x > (center.left + center.right) / 2,
             bottom: anchor.y > (center.top + center.bottom) / 2,
         };
-        // SAFETY: valid window handle; the attribute value outlives the call.
-        unsafe {
-            let dark = i32::from(!self.theme.apps_light);
-            let _ = DwmSetWindowAttribute(
+        self.apply_theme();
+    }
+
+    /// Dark/light frame, then the backdrop: both decide the acrylic's base color, so the
+    /// dark flag goes first and the backdrop is re-applied after it. Before the window is shown.
+    fn apply_theme(&self) {
+        set_dwm_int(
+            self.hwnd,
+            DWMWA_USE_IMMERSIVE_DARK_MODE,
+            i32::from(!self.theme.taskbar_light),
+        );
+        if self.acrylic {
+            set_dwm_int(
                 self.hwnd,
-                DWMWA_USE_IMMERSIVE_DARK_MODE,
-                &dark as *const i32 as *const _,
-                size_of::<i32>() as u32,
+                DWMWA_SYSTEMBACKDROP_TYPE,
+                DWMSBT_TRANSIENTWINDOW.0,
             );
         }
     }
@@ -1087,7 +1107,7 @@ impl State {
             return;
         }
         let layout = self.layout();
-        let colors = colors(self.theme.apps_light, self.acrylic);
+        let colors = colors(self.theme.taskbar_light, self.acrylic);
         let (Some((_, fonts)), Some(target)) = (&self.fonts, &self.target) else {
             return;
         };
@@ -1226,6 +1246,20 @@ impl State {
 // Window
 // ---------------------------------------------------------------------------
 
+/// Set an integer DWM window attribute; whether DWM accepted it.
+fn set_dwm_int(hwnd: HWND, attr: DWMWINDOWATTRIBUTE, value: i32) -> bool {
+    // SAFETY: `value` outlives the call and its size is passed.
+    unsafe {
+        DwmSetWindowAttribute(
+            hwnd,
+            attr,
+            &value as *const i32 as *const _,
+            size_of::<i32>() as u32,
+        )
+        .is_ok()
+    }
+}
+
 impl State {
     fn create() -> Option<State> {
         // SAFETY: plain Win32/COM creation; `class` outlives both calls that read it.
@@ -1265,18 +1299,14 @@ impl State {
             // Windows 11: rounded corners and a transient acrylic backdrop that shows through
             // the extended frame. If DWM rejects any of it, paint an opaque background instead.
             let theme = Theme::read();
-            let set = |attr, value: i32| {
-                DwmSetWindowAttribute(
-                    hwnd,
-                    attr,
-                    &value as *const i32 as *const _,
-                    size_of::<i32>() as u32,
-                )
-                .is_ok()
-            };
+            set_dwm_int(
+                hwnd,
+                DWMWA_USE_IMMERSIVE_DARK_MODE,
+                i32::from(!theme.taskbar_light),
+            );
             let acrylic = theme.is_win11
-                && set(DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND.0)
-                && set(DWMWA_SYSTEMBACKDROP_TYPE, DWMSBT_TRANSIENTWINDOW.0)
+                && set_dwm_int(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND.0)
+                && set_dwm_int(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, DWMSBT_TRANSIENTWINDOW.0)
                 && DwmExtendFrameIntoClientArea(
                     hwnd,
                     &MARGINS {

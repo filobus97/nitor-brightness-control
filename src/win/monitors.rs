@@ -59,8 +59,13 @@ pub struct FoundMonitor {
     pub rect: RECT,
     /// `None` if Windows gave no physical handle (not controllable).
     pub handle: Option<PhysicalHandle>,
-    /// Built-in panel (laptop display): reachable through WMI instead of DDC/CI.
+    /// Built-in panel (laptop display) according to DisplayConfig: reachable through WMI
+    /// instead of DDC/CI. The app also marks panels that WMI lists (see `display_id`).
     pub internal: bool,
+    /// DisplayConfig `monitorDevicePath` (empty if unknown).
+    pub device_path: String,
+    /// Raw `DISPLAYCONFIG_VIDEO_OUTPUT_TECHNOLOGY` value (-1 if unknown), for diagnostics.
+    pub output_tech: i32,
 }
 
 /// What DisplayConfig knows about one active path's target.
@@ -70,6 +75,7 @@ struct Target {
     device_path: String,
     edid_mfg: u16,
     edid_prod: u16,
+    output_tech: i32,
     internal: bool,
 }
 
@@ -134,6 +140,7 @@ fn query_targets() -> Vec<Target> {
             device_path: from_wide(&tgt.monitorDevicePath),
             edid_mfg: tgt.edidManufactureId,
             edid_prod: tgt.edidProductCodeId,
+            output_tech: p.targetInfo.outputTechnology.0,
             internal: matches!(
                 p.targetInfo.outputTechnology,
                 DISPLAYCONFIG_OUTPUT_TECHNOLOGY_INTERNAL
@@ -360,6 +367,8 @@ pub fn enumerate() -> Vec<FoundMonitor> {
                 rect,
                 handle,
                 internal: target.is_some_and(|t| t.internal),
+                device_path: target.map(|t| t.device_path.clone()).unwrap_or_default(),
+                output_tech: target.map_or(-1, |t| t.output_tech),
             });
         }
     }
