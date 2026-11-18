@@ -79,6 +79,8 @@ pub enum Key {
     FirstRunText,
     /// Balloon when the autostart entry pointed to an old location and was fixed.
     AutostartFixed,
+    /// Balloon when the autostart entry pointed to another existing exe; `{}` is the product.
+    AutostartSwitched,
     /// Balloon after a crash during detection; monitors were skipped.
     SafeModeText,
     /// Balloon when a hotkey couldn't be registered; `{}` is replaced by the hotkey.
@@ -154,6 +156,7 @@ const ALL_KEYS: &[Key] = &[
     Key::FirstRunTitle,
     Key::FirstRunText,
     Key::AutostartFixed,
+    Key::AutostartSwitched,
     Key::SafeModeText,
     Key::HotkeyConflict,
     Key::Brightness,
@@ -230,6 +233,7 @@ pub fn tr(lang: Lang, key: Key) -> &'static str {
             Key::AutostartFixed => {
                 "Nitor was moved, so the \"Start with Windows\" entry now points to the new location."
             }
+            Key::AutostartSwitched => "\"Start with Windows\" now opens {}.",
             Key::SafeModeText => {
                 "Nitor closed unexpectedly while detecting monitors last time, so those monitors were skipped this time. Use Rescan to try again."
             }
@@ -302,6 +306,7 @@ pub fn tr(lang: Lang, key: Key) -> &'static str {
             Key::AutostartFixed => {
                 "Nitor è stato spostato, quindi la voce \"Avvia con Windows\" ora punta alla nuova posizione."
             }
+            Key::AutostartSwitched => "\"Avvia con Windows\" ora apre {}.",
             Key::SafeModeText => {
                 "Nitor si è chiuso in modo imprevisto durante il rilevamento dei monitor l'ultima volta, quindi questa volta quei monitor sono stati saltati. Usa Rileva monitor per riprovare."
             }

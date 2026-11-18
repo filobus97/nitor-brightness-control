@@ -18,7 +18,6 @@ pub struct Place {
     pub country: Option<String>,
     pub latitude: f64,
     pub longitude: f64,
-    pub postcodes: Vec<String>,
 }
 
 impl Place {
@@ -41,7 +40,7 @@ impl Place {
     }
 }
 
-/// The request URL for `query` (names, and postcodes in many countries).
+/// The request URL for `query` (place names).
 pub fn search_url(query: &str, lang: Lang) -> String {
     let query: String = query.trim().chars().take(MAX_QUERY_CHARS).collect();
     format!(
@@ -64,13 +63,6 @@ fn percent_encode(s: &str) -> String {
     out
 }
 
-/// Whether the query looks like a bare postcode (digits and spaces only): the API
-/// matches postcodes only for some countries, so an empty answer gets a hint.
-pub fn is_numeric_query(query: &str) -> bool {
-    let q = query.trim();
-    !q.is_empty() && q.chars().all(|c| c.is_ascii_digit() || c == ' ')
-}
-
 /// The places in an API answer (at most [`MAX_RESULTS`]). No `results` key, which is how
 /// the API says "nothing found", gives an empty list; `None` if the text is not JSON.
 pub fn parse(json: &str) -> Option<Vec<Place>> {
@@ -88,23 +80,12 @@ pub fn parse(json: &str) -> Option<Vec<Place>> {
             ) else {
                 continue;
             };
-            let postcodes = match field(o, "postcodes") {
-                Some(Json::Arr(codes)) => codes
-                    .iter()
-                    .filter_map(|c| match c {
-                        Json::Str(s) => Some(s.clone()),
-                        _ => None,
-                    })
-                    .collect(),
-                _ => Vec::new(),
-            };
             places.push(Place {
                 name,
                 admin1: field_str(o, "admin1"),
                 country: field_str(o, "country"),
                 latitude: *latitude,
                 longitude: *longitude,
-                postcodes,
             });
         }
     }
@@ -136,10 +117,8 @@ mod tests {
         assert_eq!(rome.admin1.as_deref(), Some("Lazio"));
         assert_eq!(rome.country.as_deref(), Some("Italy"));
         assert_eq!((rome.latitude, rome.longitude), (41.89193, 12.51133));
-        assert_eq!(rome.postcodes, ["00100", "00118", "00199"]);
         assert_eq!(rome.label(), "Rome, Lazio, Italy");
         assert_eq!(places[1].longitude, -85.16467);
-        assert!(places[1].postcodes.is_empty());
         assert_eq!(places[2].label(), "Singapore");
     }
 
@@ -165,13 +144,5 @@ mod tests {
             "https://geocoding-api.open-meteo.com/v1/search?name=Reggio%20Emilia&count=5&language=it&format=json"
         );
         assert!(search_url("Zürich & co", Lang::En).contains("name=Z%C3%BCrich%20%26%20co&"));
-    }
-
-    #[test]
-    fn numeric_queries() {
-        assert!(is_numeric_query("00100"));
-        assert!(is_numeric_query(" 42 100 "));
-        assert!(!is_numeric_query("SW1A"));
-        assert!(!is_numeric_query("  "));
     }
 }

@@ -53,6 +53,33 @@ pub fn classify_run(stored: &str, exe: &str) -> RunEntry {
     }
 }
 
+/// The exe path inside a stored Run value (quotes and the autostart flag removed).
+pub fn run_path(stored: &str) -> &str {
+    let stored = stored.trim();
+    stored
+        .strip_suffix(AUTOSTART_FLAG)
+        .unwrap_or(stored)
+        .trim()
+        .trim_matches('"')
+}
+
+/// Why a stale Run entry was rewritten.
+#[derive(Debug, PartialEq, Eq)]
+pub enum StaleFix {
+    /// The old exe is gone: Nitor was moved.
+    Moved,
+    /// The old exe still exists (e.g. the other edition): the last one run wins.
+    Switched,
+}
+
+pub fn stale_fix(old_exe_exists: bool) -> StaleFix {
+    if old_exe_exists {
+        StaleFix::Switched
+    } else {
+        StaleFix::Moved
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -79,6 +106,17 @@ mod tests {
         assert!(take_flag(&mut args, AUTOSTART_FLAG));
         assert_eq!(args, ["list"]);
         assert!(!take_flag(&mut args, AUTOSTART_FLAG));
+    }
+
+    #[test]
+    fn stale_entries_are_told_apart() {
+        assert_eq!(
+            run_path(r#""D:\Old\Nitor.exe" --autostart"#),
+            r"D:\Old\Nitor.exe"
+        );
+        assert_eq!(run_path(r"D:\Old\Nitor.exe"), r"D:\Old\Nitor.exe");
+        assert_eq!(stale_fix(false), StaleFix::Moved);
+        assert_eq!(stale_fix(true), StaleFix::Switched);
     }
 
     #[test]

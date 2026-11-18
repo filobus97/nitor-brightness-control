@@ -31,7 +31,7 @@ use crate::config::{Config, MonitorSettings};
 use crate::display_id::display_key;
 use crate::i18n::{Key, Lang, tr, tr_with};
 use crate::link::link_value;
-use crate::startup;
+use crate::startup::{self, StaleFix};
 use crate::update::{self, Release};
 use std::cell::RefCell;
 use std::ffi::c_void;
@@ -487,8 +487,15 @@ impl App {
                 tr_with(lang, Key::Updated, update::current_version()),
             ));
         }
-        if autostart::fix_stale() {
-            balloons.push((app_name(), tr(lang, Key::AutostartFixed).to_string()));
+        match autostart::fix_stale() {
+            Some(StaleFix::Moved) => {
+                balloons.push((app_name(), tr(lang, Key::AutostartFixed).to_string()));
+            }
+            Some(StaleFix::Switched) => balloons.push((
+                app_name(),
+                tr_with(lang, Key::AutostartSwitched, &update::product_title("Nitor")),
+            )),
+            None => {}
         }
         config.general.autostart = autostart::is_enabled();
         let safe_skip = std::mem::take(&mut config.general.detection_in_progress);
