@@ -72,7 +72,7 @@ The platform-independent logic (CLI grammar, config, colors, write throttling) b
 
 ## Releasing
 
-Bump `version` in `Cargo.toml`, merge to `main`, then either run **Actions → CI → Run workflow** on `main` with **release** ticked, or push a matching `vX.Y.Z` tag. CI builds both exes and publishes them with `SHA256SUMS.txt`; running copies of Nitor pick the new version up through their update check.
+Bump `version` in `Cargo.toml` and merge to `main`: CI publishes `vX.Y.Z` automatically when that release doesn't exist yet (a matching pushed tag, or **Run workflow** with **release** ticked, also work). CI builds both exes and publishes them with `SHA256SUMS.txt`; running copies of Nitor pick the new version up through their update check.
 
 ## License
 
