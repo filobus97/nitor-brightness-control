@@ -490,11 +490,11 @@ impl Builder {
         row.l + self.d(PAD)
     }
 
-    fn toggle_row(&mut self, t: Toggle, title: String) {
+    fn toggle_row(&mut self, t: Toggle, title: String, sub: Option<String>) {
         let row = self.row(ROW_H);
         let c = self.slot(row, self.edge(row), SWITCH_W, SWITCH_H);
         self.ctl(Ctl::Toggle(t), c);
-        self.label(row, self.left(row), c.l, title, None);
+        self.label(row, self.left(row), c.l, title, sub);
     }
 
     fn choice_row(&mut self, choice: Choice, n: usize, seg_w: f32, title: String) {
@@ -688,13 +688,13 @@ impl State {
 
         b.heading(Key::SecGeneral);
         b.begin_card();
-        b.toggle_row(Toggle::Autostart, t(Key::MenuStartWithWindows));
+        b.toggle_row(Toggle::Autostart, t(Key::MenuStartWithWindows), None);
         b.choice_row(Choice::Language, 3, 84.0, t(Key::LblLanguage));
         if self.snap.monitors.iter().any(|m| m.internal) {
-            b.toggle_row(Toggle::Internal, t(Key::MenuInternalDisplay));
+            b.toggle_row(Toggle::Internal, t(Key::MenuInternalDisplay), None);
         }
-        b.toggle_row(Toggle::Updates, t(Key::LblCheckUpdates));
-        let version = tr_with(lang, Key::LblVersion, update::current_version());
+        b.toggle_row(Toggle::Updates, t(Key::LblCheckUpdates), None);
+        let version = tr_with(lang, Key::LblVersion, &update::version_label());
         b.button_row(Btn::CheckNow, 120.0, version);
         b.end_card(SECTION_GAP);
 
@@ -702,7 +702,11 @@ impl State {
         b.begin_card();
         b.choice_row(Choice::TrayStyle, 2, 96.0, t(Key::LblTrayStyle));
         b.choice_row(Choice::WheelStep, 4, 52.0, t(Key::LblWheelStep));
-        b.toggle_row(Toggle::RefreshOnOpen, t(Key::LblRefreshOnOpen));
+        b.toggle_row(
+            Toggle::RefreshOnOpen,
+            t(Key::LblRefreshOnOpen),
+            Some(t(Key::LblRefreshOnOpenHint)),
+        );
         b.end_card(SECTION_GAP);
 
         b.heading(Key::SecMonitors);
@@ -807,7 +811,7 @@ impl State {
         });
         b.label(row, b.left(row), rect.l, t(Key::LblBadge), None);
 
-        b.toggle_row(Toggle::Shown(i), t(Key::LblShowInTray));
+        b.toggle_row(Toggle::Shown(i), t(Key::LblShowInTray), None);
 
         let row = b.row(ROW_H);
         let value = Rect::new(b.edge(row) - b.d(72.0), row.t, b.edge(row), row.b);
@@ -1794,7 +1798,7 @@ fn create(snap: Snapshot) -> Option<HWND> {
         let y = work.top + (work.bottom - work.top - h) / 2;
 
         let hinst = HINSTANCE(GetModuleHandleW(None).ok()?.0);
-        let title = util::wide(tr(snap.lang, Key::SettingsTitle));
+        let title = util::wide(&update::product_title(tr(snap.lang, Key::SettingsTitle)));
         let hwnd = CreateWindowExW(
             WINDOW_EX_STYLE(0),
             CLASS,
@@ -2054,6 +2058,7 @@ unsafe extern "system" fn wnd_proc(
         WM_DESTROY => {
             // Dropping the state frees the Direct2D target and the GDI objects.
             STATE.with(|cell| cell.try_borrow_mut().ok().and_then(|mut s| s.take()));
+            util::trim_working_set();
         }
         // SAFETY: default processing with the arguments we were given.
         _ => return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },

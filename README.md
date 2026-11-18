@@ -22,6 +22,13 @@ Not sure? **Settings → System → About → System type**. The binary isn't co
 
 Windows 11 hides new tray icons in the overflow menu. To keep Nitor's icons visible, drag them onto the taskbar, or turn them on in **Settings → Personalization → Taskbar → Other system tray icons**.
 
+## Editions
+
+- **Nitor** (`Nitor-x64.exe`, `Nitor-arm64.exe`): per-monitor brightness, everything described here.
+- **Nitor Plus** (`NitorPlus-x64.exe`, `NitorPlus-arm64.exe`): everything in Nitor plus automation features such as automatic brightness and color temperature, arriving in upcoming releases.
+
+Each edition updates itself to the same edition's newer release. Build Plus with `cargo build --release --features plus`.
+
 ## Usage
 
 | Action | Result |

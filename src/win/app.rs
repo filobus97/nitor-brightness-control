@@ -211,7 +211,12 @@ fn build_entries(
 
 /// `InstanceName`s WMI lists for active brightness-capable panels. Runs on the calling
 /// thread (needs COM); one local query, about 10-50 ms, which is fine at scan time.
-fn wmi_instances() -> Vec<String> {
+/// Skipped (WMI isn't even loaded) unless a built-in panel is possible: the setting is on,
+/// or a monitor that DisplayConfig doesn't call built-in has no DDC/CI handle.
+fn wmi_instances(internal_display: bool, found: &[FoundMonitor]) -> Vec<String> {
+    if !internal_display && !found.iter().any(|f| !f.internal && f.handle.is_none()) {
+        return Vec::new();
+    }
     let found = Wmi::connect(None)
         .map(|w| w.instances())
         .unwrap_or_default();
@@ -508,12 +513,9 @@ impl App {
         self.clear();
         self.probe_done = false;
         let skip = std::mem::take(&mut self.safe_skip);
-        let (entries, changed) = build_entries(
-            &mut self.config,
-            monitors::enumerate(),
-            &skip,
-            &wmi_instances(),
-        );
+        let found = monitors::enumerate();
+        let wmi = wmi_instances(self.config.general.internal_display, &found);
+        let (entries, changed) = build_entries(&mut self.config, found, &skip, &wmi);
         for e in &entries {
             let backend = match &e.backend {
                 Some(Backend::Ddc(_)) => "ddc".to_string(),
@@ -658,6 +660,7 @@ impl App {
         for cmd in std::mem::take(&mut self.initial) {
             self.exec(&cmd);
         }
+        util::trim_working_set();
     }
 
     /// The tray icon a balloon can be attached to (none before the first icon exists).
@@ -1743,7 +1746,9 @@ pub fn standalone(config_path: &Path, commands: &[Command]) -> i32 {
     // SAFETY: this thread has no COM apartment yet; WMI needs one for the built-in display.
     let _ = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
     wmi::init_security();
-    let (entries, _) = build_entries(&mut config, monitors::enumerate(), &skip, &wmi_instances());
+    let found = monitors::enumerate();
+    let wmi = wmi_instances(config.general.internal_display, &found);
+    let (entries, _) = build_entries(&mut config, found, &skip, &wmi);
     let rows: Vec<Row> = entries
         .into_iter()
         .map(|mut e| {
