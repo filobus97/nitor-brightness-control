@@ -28,6 +28,7 @@ pub mod wmi;
 
 use crate::cli::{self, Command};
 use crate::config;
+use crate::startup;
 use instance::Instance;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -40,6 +41,7 @@ use windows::core::PCWSTR;
 pub fn main() -> i32 {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     let after_update = take_after_update(&mut args);
+    let autostart = startup::take_flag(&mut args, startup::AUTOSTART_FLAG);
     if let Some(pid) = after_update {
         // Our predecessor holds the single-instance mutex until it exits.
         update::wait_for_exit(pid);
@@ -74,7 +76,12 @@ pub fn main() -> i32 {
     match instance::acquire() {
         Instance::Secondary(hwnd) => forward_to_primary(hwnd, &args),
         // The guard keeps the single-instance mutex until the process exits.
-        Instance::Primary(_guard) => run_primary(config_path, inv.commands, after_update.is_some()),
+        Instance::Primary(_guard) => run_primary(
+            config_path,
+            inv.commands,
+            after_update.is_some(),
+            autostart,
+        ),
     }
 }
 
@@ -128,7 +135,10 @@ fn wait_for_primary_window() -> HWND {
 }
 
 /// No other instance runs (we hold the mutex): decide between standalone and the tray app.
-fn run_primary(config_path: PathBuf, commands: Vec<Command>, updated: bool) -> i32 {
+fn run_primary(config_path: PathBuf, commands: Vec<Command>,
+    updated: bool,
+    autostart: bool,
+) -> i32 {
     let is_query = |c: &Command| matches!(c, Command::List | Command::Get(_));
     if !commands.is_empty() && commands.iter().all(is_query) {
         return app::standalone(&config_path, &commands);
@@ -141,5 +151,5 @@ fn run_primary(config_path: PathBuf, commands: Vec<Command>, updated: bool) -> i
         .into_iter()
         .filter(|c| !matches!(c, Command::Quit | Command::Rescan))
         .collect();
-    app::run(config_path, initial, updated)
+    app::run(config_path, initial, updated, autostart)
 }

@@ -7,6 +7,7 @@ use windows::Win32::System::Registry::{
 use windows::core::{PCWSTR, Result};
 
 use super::util::{exe_path, from_wide, wide};
+use crate::startup::{self, RunEntry};
 
 const SUBKEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 const VALUE: &str = "Nitor";
@@ -33,7 +34,7 @@ fn read() -> Option<String> {
 
 fn write() -> WIN32_ERROR {
     let (key, name) = (wide(SUBKEY), wide(VALUE));
-    let data = wide(&format!("\"{}\"", exe_path().display()));
+    let data = wide(&startup::run_value(&exe_path().to_string_lossy()));
     // SAFETY: `data` is a NUL-terminated UTF-16 buffer; the size is in bytes incl. the NUL.
     unsafe {
         RegSetKeyValueW(
@@ -51,7 +52,7 @@ pub fn is_enabled() -> bool {
     read().is_some()
 }
 
-/// Write (quoted current exe path) or delete the Run value.
+/// Write (quoted current exe path plus `--autostart`) or delete the Run value.
 pub fn set(enabled: bool) -> Result<()> {
     let rc = if enabled {
         write()
@@ -75,14 +76,17 @@ pub fn set(enabled: bool) -> Result<()> {
     rc.ok()
 }
 
-/// If the Run value exists but points to a different path, rewrite it to the
-/// current exe and return `true`.
+/// If the Run value exists but points to a different path, rewrite it to the current
+/// exe and return `true`. An entry for the current exe without `--autostart` (older
+/// versions) is upgraded silently.
 pub fn fix_stale() -> bool {
     let Some(cur) = read() else { return false };
-    let stored = cur.trim().trim_matches('"');
-    let exe = exe_path();
-    if stored.eq_ignore_ascii_case(&exe.to_string_lossy()) {
-        return false;
+    match startup::classify_run(&cur, &exe_path().to_string_lossy()) {
+        RunEntry::Current => false,
+        RunEntry::NeedsFlag => {
+            write();
+            false
+        }
+        RunEntry::Stale => write() == ERROR_SUCCESS,
     }
-    write() == ERROR_SUCCESS
 }
