@@ -25,9 +25,13 @@ Windows 11 hides new tray icons in the overflow menu. To keep Nitor's icons visi
 ## Editions
 
 - **Nitor** (`Nitor-x64.exe`, `Nitor-arm64.exe`): per-monitor brightness, everything described here.
-- **Nitor Plus** (`NitorPlus-x64.exe`, `NitorPlus-arm64.exe`): everything in Nitor plus automation features such as automatic brightness and color temperature, arriving in upcoming releases.
+- **Nitor Plus** (`NitorPlus-x64.exe`, `NitorPlus-arm64.exe`): everything in Nitor plus automation features: automatic brightness (see below), with color temperature to follow.
 
 Each edition updates itself to the same edition's newer release. Build Plus with `cargo build --release --features plus`.
+
+### Nitor Plus: automatic brightness
+
+Set your location (or let Windows provide it) and the day and night brightness in **Settings → Automation**, and Nitor follows the sun: dim at night, bright by day, changing gradually around dawn and dusk, each monitor within its own linked range. If the PC has an ambient light sensor, Nitor can follow the room's light instead. If you change a monitor by hand, automation leaves it alone until the next sunrise or sunset (or for a set number of minutes); **Pause automation for 1 hour** in the tray menu stops it temporarily. Nitor stays idle in between: it sleeps until the next change is due and does nothing else. On a laptop, turn off Windows' own "Change brightness automatically when lighting changes" so the two don't compete. See [`docs/SPEC.md` §16](docs/SPEC.md#16-nitor-plus-automation).
 
 ## Usage
 

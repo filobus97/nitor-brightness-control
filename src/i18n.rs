@@ -1,5 +1,10 @@
 //! UI strings. Add a language by adding a `Lang` variant and one arm per key in `tr`.
 
+#[cfg(feature = "plus")]
+mod plus;
+#[cfg(feature = "plus")]
+pub use plus::PlusKey;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum Lang {
     #[default]
@@ -47,6 +52,9 @@ pub enum Key {
     MenuInternalDisplay,
     MenuExit,
     MenuCheckUpdates,
+    /// Plus: tray menu items for the global automation pause.
+    MenuPauseAuto,
+    MenuResumeAuto,
     /// Menu item to install a found update; `{}` is the version.
     MenuUpdateTo,
     /// Update balloons; `{}` is the version (or the error for `UpdateFailed`).
@@ -108,6 +116,9 @@ pub enum Key {
     StateHidden,
     StateNotControllable,
     StateBuiltInOff,
+    /// Nitor Plus Settings strings.
+    #[cfg(feature = "plus")]
+    Plus(PlusKey),
 }
 
 /// All keys, for checks that every key is translated.
@@ -120,6 +131,8 @@ const ALL_KEYS: &[Key] = &[
     Key::MenuInternalDisplay,
     Key::MenuExit,
     Key::MenuCheckUpdates,
+    Key::MenuPauseAuto,
+    Key::MenuResumeAuto,
     Key::MenuUpdateTo,
     Key::UpdateAvailable,
     Key::UpToDate,
@@ -182,6 +195,8 @@ pub fn tr(lang: Lang, key: Key) -> &'static str {
             Key::MenuInternalDisplay => "Control built-in display",
             Key::MenuExit => "Exit",
             Key::MenuCheckUpdates => "Check for updates",
+            Key::MenuPauseAuto => "Pause automation for 1 hour",
+            Key::MenuResumeAuto => "Resume automation",
             Key::MenuUpdateTo => "Update to {}",
             Key::UpdateAvailable => "Nitor {} is available",
             Key::UpToDate => "You're up to date ({})",
@@ -235,6 +250,8 @@ pub fn tr(lang: Lang, key: Key) -> &'static str {
             Key::StateHidden => "Hidden",
             Key::StateNotControllable => "Not controllable",
             Key::StateBuiltInOff => "Built-in display (control off)",
+            #[cfg(feature = "plus")]
+            Key::Plus(k) => plus::tr(Lang::En, k),
         },
         Lang::It => match key {
             Key::AppName => "Nitor",
@@ -244,6 +261,8 @@ pub fn tr(lang: Lang, key: Key) -> &'static str {
             Key::MenuInternalDisplay => "Controlla schermo integrato",
             Key::MenuExit => "Esci",
             Key::MenuCheckUpdates => "Controlla aggiornamenti",
+            Key::MenuPauseAuto => "Sospendi automazione per 1 ora",
+            Key::MenuResumeAuto => "Riprendi automazione",
             Key::MenuUpdateTo => "Aggiorna a {}",
             Key::UpdateAvailable => "È disponibile Nitor {}",
             Key::UpToDate => "Nitor è aggiornato ({})",
@@ -299,6 +318,8 @@ pub fn tr(lang: Lang, key: Key) -> &'static str {
             Key::StateHidden => "Nascosto",
             Key::StateNotControllable => "Non controllabile",
             Key::StateBuiltInOff => "Schermo integrato (controllo disattivato)",
+            #[cfg(feature = "plus")]
+            Key::Plus(k) => plus::tr(Lang::It, k),
         },
     }
 }
@@ -313,6 +334,17 @@ mod tests {
             for &key in ALL_KEYS {
                 assert!(!tr(lang, key).is_empty(), "{lang:?} {key:?} is empty");
             }
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "plus")]
+    fn plus_keys_translated_in_every_language() {
+        for lang in [Lang::En, Lang::It] {
+            for &key in plus::ALL {
+                assert!(!plus::tr(lang, key).is_empty(), "{lang:?} {key:?} is empty");
+            }
+            assert!(plus::tr(lang, PlusKey::AutoOverrideMinutes).contains("{}"));
         }
     }
 

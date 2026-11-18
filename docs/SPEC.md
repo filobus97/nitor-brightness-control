@@ -349,6 +349,24 @@ target := alias | name-substring | serial | #index | all | cursor
 
 ---
 
+## 16. Nitor Plus: automation
+
+Only in the Plus build (`--features plus`); `[auto]` is parsed in both builds but acted on only in Plus. The pure decisions live in `src/auto/` (`plan`, `drive`, `ambient`, `curve`, `solar`); `src/win/auto/` owns timers, sensor, location and the writes.
+
+**Engine.** Per monitor the engine keeps the level it last applied and the end of a manual override. A planning round (`drive::step`) turns the day/night curve (`day_brightness`/`night_brightness` over sun elevation, location from `[auto]`) into a master level, maps it through the monitor's `link_min..link_max` (`link::link_value`) and writes only if the monitor value moves by at least 2 points. The write goes through the normal brightness path (`set_value`: min/max limits, DDC throttling, EEPROM discipline of §7.2) but is marked automatic, so it is not a user override. A round runs when: the single timer fires, the first probe or a rescan finishes (startup, resume from sleep, display power-on, `WM_DISPLAYCHANGE`), settings are saved, the clock or time zone changes (`WM_TIMECHANGE`), a sensor level or a location arrives, or the pause is toggled. After resume the applied levels are forgotten, so a panel reset by sleep is corrected.
+
+**Idle guarantees.** Nothing polls. There is exactly one recurring wake-up: `TIMER_AUTO`, set to the earliest `next_wake_unix` across monitors (`plan` sleeps until the next twilight transition start, wakes during a transition only when the level will have moved by 2 points, at most every 60 s, at most 12 h when the sun never crosses a boundary) and re-armed after every round; it is killed when nothing is scheduled (automation off, no location and no sensor). The sensor is a WinRT event; the location is a one-shot background thread. Every write and every planned wake is logged in `Nitor.log` (`auto write id=... target=...% reason=solar|sensor`, `auto next wake in N s`) so idle behaviour can be audited.
+
+**Overrides and pause.** Any user change of a monitor's brightness (wheel, flyout slider or master, CLI; a built-in panel changed outside Nitor by at least 2 points, e.g. Fn keys) records an override for that monitor: until the next transition boundary (`override_mode = until_transition`, `plan::override_expiry`) or `override_minutes` minutes. The monitor's applied level is forgotten, so when the override ends the schedule is applied again. Overrides survive rescans, not restarts. The tray menu (Plus, automation on) has "Pause automation for 1 hour" / "Resume automation": a global pause kept in memory only.
+
+**Ambient light sensor.** With `use_sensor` and a sensor present (`LightSensor::GetDefault`, looked up once), the engine subscribes to `ReadingChanged` with a report interval of at least 1 s and, where the system supports it (Windows 10 2004+), a report threshold (10 % / 5 lux) so the driver suppresses small changes. The event runs on a sensor thread: it stores the lux in an atomic and posts `WM_APP_AUTO_SENSOR`; no UI state is touched there. The UI thread feeds `AmbientFilter` (log-lux smoothing, outlier hold of 4 s, 2-point hysteresis). While the sensor has produced a level it replaces the solar curve, clamped to `[night_brightness, day_brightness]`; no timer is needed in that mode except overrides ending. Because a held-back jump needs a later reading to be believed and the sensor may stay silent, each reading arms a one-shot 5 s timer (`TIMER_SENSOR`) that judges the last reading again. Disabling automation or `use_sensor` unsubscribes and restores the sensor's default report interval. `auto::sensor_available()` tells the Settings UI whether to offer the option.
+
+**Windows adaptive brightness.** If the built-in panel is automated while "Change brightness automatically when lighting changes" is on, Windows and Nitor would fight. `auto::adaptive_brightness_on()` reads `GUID_VIDEO_ADAPTIVE_DISPLAY_BRIGHTNESS` of the active scheme (AC or DC as appropriate) for the UI to show a hint; Nitor never changes it. A change of the built-in brightness by Windows is also treated as a user override, so automation steps back.
+
+**Windows location.** With `location_source = windows`, `Geolocator` (access request, then one position with a 60 s timeout, a cached fix up to 1 h old accepted) runs on a background thread when automation is enabled and then at most once per 24 h (checked when a round runs, so also after resume); without coordinates a failed attempt is retried after 10 min. The result is rounded to 2 decimals, stored in `[auto] latitude/longitude`, saved, and a round runs. Failures are only logged.
+
+---
+
 ## 17. Decisions (formerly open questions)
 
 1. **Windows 10 and 11** are both supported (Windows 10 gets the simple visual fallback).
