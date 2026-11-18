@@ -56,11 +56,11 @@ use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindow
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, EN_KILLFOCUS, EN_SETFOCUS, ES_AUTOHSCROLL,
     GetClientRect, GetCursorPos, GetParent, GetWindowTextW, IDC_ARROW, IsIconic, LoadCursorW,
-    LoadIconW, RegisterClassExW, SW_HIDE, SW_RESTORE, SW_SHOW, SWP_NOACTIVATE, SWP_NOZORDER,
-    SWP_SHOWWINDOW, SendMessageW, SetForegroundWindow, SetWindowPos, SetWindowTextW, ShowWindow,
-    WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_COMMAND,
-    WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_KEYDOWN,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCDESTROY, WM_PAINT, WM_SETFONT,
+    RegisterClassExW, SW_HIDE, SW_RESTORE, SW_SHOW, SWP_NOACTIVATE, SWP_NOZORDER, SWP_SHOWWINDOW,
+    SendMessageW, SetForegroundWindow, SetWindowPos, SetWindowTextW, ShowWindow, WINDOW_EX_STYLE,
+    WINDOW_STYLE, WM_APP, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_COMMAND, WM_CTLCOLOREDIT,
+    WM_CTLCOLORSTATIC, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN,
+    WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCDESTROY, WM_PAINT, WM_SETFONT,
     WM_SETTINGCHANGE, WM_SIZE, WNDCLASSEXW, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN, WS_MINIMIZEBOX,
     WS_OVERLAPPED, WS_SYSMENU,
 };
@@ -221,9 +221,8 @@ pub fn init(on_action: fn(Action)) {
             lpfnWndProc: Some(wnd_proc),
             hInstance: hinst,
             hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
-            // Resource 1 is the exe icon, if the build embedded one.
-            hIcon: LoadIconW(Some(hinst), PCWSTR(std::ptr::without_provenance::<u16>(1)))
-                .unwrap_or_default(),
+            hIcon: super::util::app_icon(false),
+            hIconSm: super::util::app_icon(true),
             lpszClassName: CLASS,
             ..Default::default()
         };

@@ -127,6 +127,8 @@ fn create(
             lpfnWndProc: Some(map_proc),
             hInstance: hinst,
             hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
+            hIcon: crate::win::util::app_icon(false),
+            hIconSm: crate::win::util::app_icon(true),
             lpszClassName: MAP_CLASS,
             ..Default::default()
         };
