@@ -35,6 +35,10 @@ Set your location (or let Windows provide it) and the day and night brightness i
 
 **Color temperature (experimental).** Turn on *Automatic color temperature* in **Settings → Automation** and set a day and a night temperature (2700 to 6500 K); Nitor warms the screen after sunset on the same schedule, waking only when the color has moved by about 100 K. It uses the monitor's own RGB gains over DDC/CI when the monitor supports them (Nitor remembers the original values and puts them back when you turn it off, pause, or exit; gains are written at most every 5 minutes to spare the monitor's memory), and otherwise a gamma ramp, which is always used for the built-in display. Windows limits gamma ramps to 4000 K; going warmer needs *Allow warmer than 4000 K (experimental)*, a one-time registry change that asks for administrator rights (you may need to sign out and in). Displays in HDR are skipped. If Windows' own Night Light is on, Nitor shows a hint, since both would tint the screen. **Pause automation for 1 hour** restores neutral color until you resume.
 
+**Color slider in the flyout.** Nitor Plus adds a row under the monitors with a slider from 2700 K (warm) to 6500 K (neutral) that shows the current color temperature. With automatic color on, moving it holds the automation off like a manual brightness change (until the next sunrise or sunset, or for the set minutes) and then it resumes; with it off, the slider sets a fixed temperature that Nitor keeps and re-applies at start (6500 K goes back to neutral). While you drag, only the screen's gamma follows; monitors that use DDC/CI get the final value when you let go.
+
+**Location search.** In **Settings → Automation → Location**, type a city name and press Search to pick your place.
+
 See [`docs/SPEC.md` §16](docs/SPEC.md#16-nitor-plus-automation).
 
 ## Usage
@@ -63,6 +67,8 @@ target := alias | name-substring | serial | #index | all | cursor
 Examples: `Nitor.exe b 50`, `Nitor.exe Dell b +10 LG b 30`, `Nitor.exe all b -20`.
 
 Commands are sent to the running instance; if Nitor isn't running, it starts.
+
+If both editions are installed, **Start with Windows** follows whichever you ran last; Nitor tells you when it switches the entry.
 
 ### Settings
 
