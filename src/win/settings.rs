@@ -27,7 +27,7 @@ use crate::config::{LocationSource, OverrideMode};
 use crate::i18n::PlusKey;
 use crate::i18n::{Key, Lang, tr, tr_with};
 use crate::update;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::sync::OnceLock;
 use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
@@ -46,7 +46,7 @@ use windows::Win32::Graphics::Gdi::{
     SetTextColor, ValidateRect,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::Controls::MARGINS;
+use windows::Win32::UI::Controls::{MARGINS, SetWindowTheme};
 use windows::Win32::UI::HiDpi::{AdjustWindowRectExForDpi, GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetFocus, ReleaseCapture, SetCapture, SetFocus, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
@@ -59,8 +59,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     LoadIconW, RegisterClassExW, SW_HIDE, SW_RESTORE, SW_SHOW, SWP_NOACTIVATE, SWP_NOZORDER,
     SWP_SHOWWINDOW, SendMessageW, SetForegroundWindow, SetWindowPos, SetWindowTextW, ShowWindow,
     WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_COMMAND,
-    WM_CTLCOLOREDIT, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCDESTROY, WM_PAINT, WM_SETFONT,
+    WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_KEYDOWN,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCDESTROY, WM_PAINT, WM_SETFONT,
     WM_SETTINGCHANGE, WM_SIZE, WNDCLASSEXW, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN, WS_MINIMIZEBOX,
     WS_OVERLAPPED, WS_SYSMENU,
 };
@@ -101,11 +101,27 @@ pub struct MonitorInfo {
     pub color_method: Option<crate::auto::color::Method>,
 }
 
+/// Where the update check stands, shown in the General card.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum UpdateStatus {
+    #[default]
+    Idle,
+    Checking,
+    /// Running version.
+    UpToDate(String),
+    /// Newer version found.
+    Available(String),
+    Failed(String),
+}
+
 /// Everything the window shows: the config plus what only the app knows.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Snapshot {
     pub config: Config,
     pub lang: Lang,
+    pub update: UpdateStatus,
+    /// The config file in use (`Nitor.log` is next to it).
+    pub config_path: String,
     /// Known monitors in tray order.
     pub monitors: Vec<MonitorInfo>,
     /// Plus: this PC has an ambient light sensor.
@@ -174,11 +190,13 @@ pub enum Action {
     InternalDisplay(bool),
     CheckUpdates(bool),
     CheckNow,
+    Install,
     TrayStyle(TrayStyle),
     WheelStep(u8),
     RefreshOnOpen(bool),
     WriteInterval(u32),
     OpenConfig,
+    OpenFolder,
     /// A monitor, by stable ID.
     Monitor(String, MonitorEdit),
     #[cfg(feature = "plus")]
@@ -367,7 +385,9 @@ enum Slide {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Btn {
     CheckNow,
+    Install,
     OpenConfig,
+    OpenFolder,
     /// The color dot of monitor `i`: opens its palette.
     Color(usize),
     Up(usize),
@@ -589,11 +609,11 @@ impl Builder {
         self.label(row, self.left(row), g.l, title, None);
     }
 
-    fn button_row(&mut self, b: Btn, w: f32, title: String) {
+    fn button_row(&mut self, b: Btn, w: f32, title: String, sub: Option<String>) {
         let row = self.row(ROW_H);
         let c = self.slot(row, self.edge(row), w, BTN);
         self.ctl(Ctl::Button(b), c);
-        self.label(row, self.left(row), c.l, title, None);
+        self.label(row, self.left(row), c.l, title, sub);
     }
 }
 
@@ -706,6 +726,25 @@ thread_local! {
     static STATE: RefCell<Option<State>> = const { RefCell::new(None) };
 }
 
+thread_local! {
+    /// Text color, field color and field brush for the EDITs. Kept outside `STATE` because
+    /// Windows asks for them (WM_CTLCOLOR*) while the state is borrowed, e.g. during layout.
+    static EDIT_STYLE: Cell<Option<(COLORREF, COLORREF, HBRUSH)>> = const { Cell::new(None) };
+}
+
+/// Theme a native EDIT like the app (dark scrollbars/caret in dark mode).
+fn theme_edit(edit: HWND, light: bool) {
+    let class = if light {
+        w!("Explorer")
+    } else {
+        w!("DarkMode_Explorer")
+    };
+    // SAFETY: our own child window; the class name is static.
+    unsafe {
+        let _ = SetWindowTheme(edit, class, PCWSTR::null());
+    }
+}
+
 /// Run `f` on the state, unless it does not exist or is borrowed (re-entrant message).
 fn with_state<R>(f: impl FnOnce(&mut State) -> R) -> Option<R> {
     STATE.with(|cell| {
@@ -781,7 +820,21 @@ impl State {
         }
         b.toggle_row(Toggle::Updates, t(Key::LblCheckUpdates), None);
         let version = tr_with(lang, Key::LblVersion, &update::version_label());
-        b.button_row(Btn::CheckNow, 120.0, version);
+        let status = match &self.snap.update {
+            UpdateStatus::Idle | UpdateStatus::Available(_) => None,
+            UpdateStatus::Checking => Some(t(Key::UpdChecking)),
+            UpdateStatus::UpToDate(v) => Some(tr_with(lang, Key::UpdUpToDate, v)),
+            UpdateStatus::Failed(e) => Some(tr_with(lang, Key::UpdCheckFailed, e)),
+        };
+        b.button_row(Btn::CheckNow, 120.0, version, status);
+        if let UpdateStatus::Available(v) = &self.snap.update {
+            b.button_row(
+                Btn::Install,
+                120.0,
+                tr_with(lang, Key::UpdAvailable, v),
+                None,
+            );
+        }
         b.end_card(SECTION_GAP);
 
         b.heading(Key::SecTray);
@@ -818,7 +871,13 @@ impl State {
             .push(Node::Value(format!("{} ms", g.write_interval_ms), value));
         b.ctl(Ctl::Slider(Slide::Interval), slider);
         b.label(row, b.left(row), slider.l, t(Key::LblWriteInterval), None);
-        b.button_row(Btn::OpenConfig, 210.0, t(Key::LblConfigFile));
+        b.button_row(
+            Btn::OpenConfig,
+            210.0,
+            t(Key::LblConfigFile),
+            Some(self.snap.config_path.clone()),
+        );
+        b.button_row(Btn::OpenFolder, 210.0, t(Key::LblLogFolder), None);
         b.end_card(0.0);
 
         Layout {
@@ -987,11 +1046,23 @@ impl State {
                 &mut self.edit_brush,
                 CreateSolidBrush(colorref(self.pal.field)),
             );
+            self.publish_edit_style();
             for e in &self.edits {
+                theme_edit(e.hwnd, self.theme.apps_light);
                 invalidate(e.hwnd);
             }
             let _ = DeleteObject(HGDIOBJ(old.0));
         }
+    }
+
+    /// Hand the current EDIT colors and brush to `wnd_proc` (see `EDIT_STYLE`).
+    fn publish_edit_style(&self) {
+        let style = (
+            colorref(self.pal.text),
+            colorref(self.pal.field),
+            self.edit_brush,
+        );
+        EDIT_STYLE.set(Some(style));
     }
 
     fn scroll_by(&mut self, delta: i32) -> bool {
@@ -1109,7 +1180,9 @@ impl State {
             }
             Ctl::Button(b) => match b {
                 Btn::CheckNow => Some(Action::CheckNow),
+                Btn::Install => Some(Action::Install),
                 Btn::OpenConfig => Some(Action::OpenConfig),
+                Btn::OpenFolder => Some(Action::OpenFolder),
                 Btn::Color(i) => {
                     let id = self.snap.monitors.get(i)?.id.clone();
                     self.picker = if self.picker.as_ref() == Some(&id) {
@@ -1291,6 +1364,7 @@ impl State {
                     Some(LPARAM(1)),
                 );
             }
+            theme_edit(hwnd, self.theme.apps_light);
             let _ = SetWindowSubclass(hwnd, Some(edit_proc), EDIT_SUBCLASS, 0);
             Some(Edit {
                 hwnd,
@@ -1856,10 +1930,11 @@ impl State {
                 cv.text(glyph, &fonts.glyph, r, pal.text, 0.9 * a);
             }
             Ctl::Button(b) => {
-                let key = if b == Btn::CheckNow {
-                    Key::BtnCheckNow
-                } else {
-                    Key::BtnOpenConfig
+                let key = match b {
+                    Btn::CheckNow => Key::BtnCheckNow,
+                    Btn::Install => Key::BtnInstall,
+                    Btn::OpenFolder => Key::BtnOpenFolder,
+                    _ => Key::BtnOpenConfig,
                 };
                 self.draw_button(cv, r, tr(self.lang(), key), hot);
             }
@@ -2044,6 +2119,7 @@ fn create(snap: Snapshot) -> Option<HWND> {
             let _ = DestroyWindow(hwnd);
             return None;
         };
+        state.publish_edit_style();
         STATE.with(|cell| *cell.borrow_mut() = Some(state));
         with_state(State::sync_all);
         Some(hwnd)
@@ -2054,6 +2130,7 @@ impl Drop for State {
     fn drop(&mut self) {
         // SAFETY: the window (and with it every EDIT) is gone; the objects are ours.
         unsafe {
+            EDIT_STYLE.set(None);
             let _ = DeleteObject(HGDIOBJ(self.edit_brush.0));
             if let Some((_, font)) = self.gdi_font {
                 let _ = DeleteObject(HGDIOBJ(font.0));
@@ -2204,15 +2281,14 @@ unsafe extern "system" fn wnd_proc(
             let edit = HWND(lparam.0 as *mut c_void);
             with_state(|st| st.restore_text(edit));
         }
-        WM_CTLCOLOREDIT => {
-            let hdc = HDC(wparam.0 as *mut c_void);
-            // SAFETY: `hdc` is the EDIT's device context for the duration of this message.
-            let brush = with_state(|st| unsafe {
-                SetTextColor(hdc, colorref(st.pal.text));
-                SetBkColor(hdc, colorref(st.pal.field));
-                st.edit_brush
-            });
-            if let Some(brush) = brush {
+        WM_CTLCOLOREDIT | WM_CTLCOLORSTATIC => {
+            if let Some((text, bg, brush)) = EDIT_STYLE.get() {
+                let hdc = HDC(wparam.0 as *mut c_void);
+                // SAFETY: `hdc` is the control's device context for the duration of this message.
+                unsafe {
+                    SetTextColor(hdc, text);
+                    SetBkColor(hdc, bg);
+                }
                 return LRESULT(brush.0 as isize);
             }
             // SAFETY: default processing with the arguments we were given.

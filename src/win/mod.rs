@@ -76,12 +76,9 @@ pub fn main() -> i32 {
     match instance::acquire() {
         Instance::Secondary(hwnd) => forward_to_primary(hwnd, &args),
         // The guard keeps the single-instance mutex until the process exits.
-        Instance::Primary(_guard) => run_primary(
-            config_path,
-            inv.commands,
-            after_update.is_some(),
-            autostart,
-        ),
+        Instance::Primary(_guard) => {
+            run_primary(config_path, inv.commands, after_update.is_some(), autostart)
+        }
     }
 }
 
@@ -135,10 +132,13 @@ fn wait_for_primary_window() -> HWND {
 }
 
 /// No other instance runs (we hold the mutex): decide between standalone and the tray app.
-fn run_primary(config_path: PathBuf, commands: Vec<Command>,
+fn run_primary(
+    config_path: PathBuf,
+    commands: Vec<Command>,
     updated: bool,
     autostart: bool,
 ) -> i32 {
+    util::log(&format!("config {}", config_path.display()));
     let is_query = |c: &Command| matches!(c, Command::List | Command::Get(_));
     if !commands.is_empty() && commands.iter().all(is_query) {
         return app::standalone(&config_path, &commands);

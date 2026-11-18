@@ -62,7 +62,14 @@ mod tests {
         let all: Vec<_> = (0..6).map(retry_delay_ms).collect();
         assert_eq!(
             all,
-            [Some(5_000), Some(15_000), Some(30_000), Some(60_000), None, None]
+            [
+                Some(5_000),
+                Some(15_000),
+                Some(30_000),
+                Some(60_000),
+                None,
+                None
+            ]
         );
     }
 
@@ -82,9 +89,15 @@ mod tests {
             classify_run(&run_value(&exe.to_uppercase()), exe),
             RunEntry::Current
         );
-        assert_eq!(classify_run(&format!("\"{exe}\""), exe), RunEntry::NeedsFlag);
+        assert_eq!(
+            classify_run(&format!("\"{exe}\""), exe),
+            RunEntry::NeedsFlag
+        );
         assert_eq!(classify_run(exe, exe), RunEntry::NeedsFlag);
-        assert_eq!(classify_run(r#""D:\Old\Nitor.exe" --autostart"#, exe), RunEntry::Stale);
+        assert_eq!(
+            classify_run(r#""D:\Old\Nitor.exe" --autostart"#, exe),
+            RunEntry::Stale
+        );
         assert_eq!(classify_run(r#""D:\Old\Nitor.exe""#, exe), RunEntry::Stale);
     }
 }

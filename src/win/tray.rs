@@ -98,10 +98,16 @@ pub fn rect(hwnd: HWND, uid: u32) -> Option<RECT> {
 }
 
 /// Show a balloon/toast notification attached to the icon.
-pub fn balloon(hwnd: HWND, uid: u32, title: &str, text: &str) {
+/// `quiet_time`: let Windows hold it back during quiet time / Focus; pass `false` for the
+/// answer to a user's action.
+pub fn balloon(hwnd: HWND, uid: u32, title: &str, text: &str, quiet_time: bool) {
     let mut nid = data(hwnd, uid);
     nid.uFlags = NIF_INFO;
-    nid.dwInfoFlags = NIIF_INFO | NIIF_RESPECT_QUIET_TIME;
+    nid.dwInfoFlags = if quiet_time {
+        NIIF_INFO | NIIF_RESPECT_QUIET_TIME
+    } else {
+        NIIF_INFO
+    };
     copy_str(&mut nid.szInfoTitle, title);
     copy_str(&mut nid.szInfo, text);
     // SAFETY: `nid` is valid for the call.

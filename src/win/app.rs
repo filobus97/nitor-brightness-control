@@ -13,7 +13,7 @@ use super::flyout::{self, Action, FlyoutRow};
 use super::icon::{self, IconContent, IconRenderer, IconSpec, OwnedIcon};
 use super::instance::{self, WINDOW_CLASS};
 use super::monitors::{self, FoundMonitor};
-use super::settings::{self, MonitorEdit, MonitorInfo, MonitorState, Snapshot};
+use super::settings::{self, MonitorEdit, MonitorInfo, MonitorState, Snapshot, UpdateStatus};
 use super::theme::{self, Theme};
 use super::tray::{self, TrayEvent, WM_APP_TRAY};
 use super::update::{self as updater, InstallError};
@@ -31,6 +31,7 @@ use crate::config::{Config, MonitorSettings};
 use crate::display_id::display_key;
 use crate::i18n::{Key, Lang, tr, tr_with};
 use crate::link::link_value;
+use crate::startup;
 use crate::update::{self, Release};
 use std::cell::RefCell;
 use std::ffi::c_void;
@@ -55,10 +56,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
     DestroyMenu, DispatchMessageW, GetCursorPos, GetMessageW, KillTimer, MENU_ITEM_FLAGS,
     MF_CHECKED, MF_SEPARATOR, MF_STRING, MSG, PBT_APMRESUMEAUTOMATIC, PBT_POWERSETTINGCHANGE,
     PostMessageW, PostQuitMessage, RegisterClassExW, RegisterWindowMessageW, SetForegroundWindow,
-    SetTimer, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WM_APP, WM_CLOSE,
-    WM_CONTEXTMENU, WM_COPYDATA, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_MOUSEMOVE,
-    WM_NULL, WM_POWERBROADCAST, WM_SETTINGCHANGE, WM_SYSCOLORCHANGE, WM_THEMECHANGED, WM_TIMER,
-    WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_POPUP,
+    SetMenuDefaultItem, SetTimer, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage,
+    WM_APP, WM_CLOSE, WM_CONTEXTMENU, WM_COPYDATA, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED,
+    WM_MOUSEMOVE, WM_NULL, WM_POWERBROADCAST, WM_SETTINGCHANGE, WM_SYSCOLORCHANGE, WM_THEMECHANGED,
+    WM_TIMER, WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_POPUP,
 };
 use windows::core::{PCWSTR, w};
 
@@ -73,6 +74,10 @@ const TIMER_WHEEL: usize = 1;
 const TIMER_RESCAN: usize = 2;
 /// Hourly: start an automatic update check if 24 h passed (survives sleep).
 const TIMER_UPDATE: usize = 3;
+/// One-shot: re-scan because monitors did not answer (see `startup::retry_delay_ms`).
+const TIMER_RETRY: usize = 4;
+/// One-shot: the delayed first scan of a start at logon.
+const TIMER_START: usize = 11;
 const UPDATE_POLL_MS: u32 = 60 * 60 * 1000;
 const WHEEL_POLL_MS: u32 = 100;
 /// Brightness notifications this soon after Nitor's own change are treated as echoes.
@@ -394,6 +399,8 @@ struct Monitor {
     health: Health,
     /// The first event arrived.
     probed: bool,
+    /// Its first probe failed (DDC/CI may not have been ready yet).
+    probe_failed: bool,
     /// Wheel delta not yet worth a full notch.
     remainder: i32,
     /// When Nitor last changed this monitor's brightness itself.
@@ -431,6 +438,12 @@ struct App {
     available: Option<Release>,
     /// The version last announced by balloon (once per version and session).
     announced: Option<String>,
+    /// What Settings shows about the update check.
+    update_status: UpdateStatus,
+    /// The check of this launch has started (later ones follow the 24 h cadence).
+    launch_checked: bool,
+    /// Automatic re-scans done since the last manual rescan or successful probe.
+    retry_step: usize,
     /// Nitor Plus automation engine.
     #[cfg(feature = "plus")]
     auto: auto::Engine,
@@ -503,6 +516,9 @@ impl App {
             update_busy: false,
             available: None,
             announced: None,
+            update_status: UpdateStatus::Idle,
+            launch_checked: false,
+            retry_step: 0,
             #[cfg(feature = "plus")]
             auto: auto::Engine::new(hwnd),
             #[cfg(feature = "plus")]
@@ -578,6 +594,7 @@ impl App {
                 worker,
                 health: Health::Ok,
                 probed: false,
+                probe_failed: false,
                 remainder: 0,
                 last_adjust: None,
                 icon: None,
@@ -647,6 +664,7 @@ impl App {
             log(&format!("probe id={} {event:?}", m.row.id));
         }
         if first && event == DdcEvent::Unresponsive && !m.row.internal {
+            m.probe_failed = true;
             // Not controllable: no icon, release the backend. (A built-in panel keeps
             // a dimmed icon so the failure is visible.)
             m.worker = None;
@@ -694,10 +712,11 @@ impl App {
 
         if let Some(uid) = self.balloon_uid() {
             for (title, text) in self.balloons.drain(..) {
-                tray::balloon(self.hwnd, uid, &title, &text);
+                tray::balloon(self.hwnd, uid, &title, &text, true);
             }
         }
         self.update_settings();
+        self.plan_retry();
         self.maybe_auto_check();
         for cmd in std::mem::take(&mut self.initial) {
             self.exec(&cmd);
@@ -706,6 +725,33 @@ impl App {
         #[cfg(feature = "plus")]
         self.auto_replan();
         util::trim_working_set();
+    }
+
+    /// Monitors that failed their first probe, or none controllable (DDC/CI often is not
+    /// ready at logon): schedule another scan with backoff, until all answered or the
+    /// schedule ends.
+    fn plan_retry(&mut self) {
+        let failed = self.monitors.iter().any(|m| m.probe_failed);
+        let none = self.monitors.iter().all(|m| !m.row.active);
+        // SAFETY: plain timer calls on our own window.
+        unsafe {
+            let _ = KillTimer(Some(self.hwnd), TIMER_RETRY);
+            if !(failed || none) {
+                self.retry_step = 0;
+                return;
+            }
+            let Some(delay) = startup::retry_delay_ms(self.retry_step) else {
+                log("probe: giving up automatic re-scans");
+                return;
+            };
+            log(&format!(
+                "probe: monitors not ready, re-scan #{} in {} s",
+                self.retry_step + 1,
+                delay / 1000
+            ));
+            self.retry_step += 1;
+            SetTimer(Some(self.hwnd), TIMER_RETRY, delay, None);
+        }
     }
 
     /// The tray icon a balloon can be attached to (none before the first icon exists).
@@ -717,9 +763,25 @@ impl App {
             .or(self.placeholder.is_some().then_some(PLACEHOLDER_UID))
     }
 
-    fn balloon(&self, text: &str) {
+    /// `quiet_time`: let Windows suppress it (automatic notices); the answer to a user's
+    /// action passes `false`.
+    fn balloon(&self, text: &str, quiet_time: bool) {
         if let Some(uid) = self.balloon_uid() {
-            tray::balloon(self.hwnd, uid, tr(self.lang, Key::AppName), text);
+            tray::balloon(
+                self.hwnd,
+                uid,
+                tr(self.lang, Key::AppName),
+                text,
+                quiet_time,
+            );
+        }
+    }
+
+    /// The answer to a manual update action: Settings shows the status line itself, so
+    /// only without Settings does it need a notification.
+    fn answer_manual(&self, text: &str) {
+        if !settings::is_open() {
+            self.balloon(text, false);
         }
     }
 
@@ -750,23 +812,30 @@ impl App {
         if self.update_busy {
             return;
         }
+        log(&format!(
+            "update check ({}): started",
+            if manual { "manual" } else { "auto" }
+        ));
+        self.update_status = UpdateStatus::Checking;
+        self.update_settings();
         self.spawn_update_job(move || UpdateEvent::Checked {
             manual,
             result: updater::check(),
         });
     }
 
-    /// Start a quiet check if enabled and 24 h passed since the last one.
+    /// Start a quiet check if enabled: once per launch, then when 24 h passed since the last one.
     fn maybe_auto_check(&mut self) {
         let last = self.config.general.last_update_check;
         let now = now_secs();
         if !self.probe_done
             || !self.config.general.check_updates
             || self.update_busy
-            || !update::check_due(last, now)
+            || (self.launch_checked && !update::check_due(last, now))
         {
             return;
         }
+        self.launch_checked = true;
         // Recorded when started, so a failing check is not retried every hour.
         self.config.general.last_update_check = now;
         self.save();
@@ -780,6 +849,7 @@ impl App {
         if self.update_busy {
             return;
         }
+        log(&format!("update install: {} started", release.tag));
         self.spawn_update_job(move || UpdateEvent::Installed(updater::install(&release)));
     }
 
@@ -795,40 +865,65 @@ impl App {
     }
 
     fn on_checked(&mut self, manual: bool, result: Result<Release, String>) {
+        let kind = if manual { "manual" } else { "auto" };
         match result {
             Ok(release) if update::is_newer(update::current_version(), release.version()) => {
                 let version = release.version().to_string();
-                if manual || self.announced.as_deref() != Some(&version) {
-                    self.balloon(&tr_with(self.lang, Key::UpdateAvailable, &version));
-                    self.announced = Some(version);
+                log(&format!("update check ({kind}): {version} available"));
+                let text = tr_with(self.lang, Key::UpdateAvailable, &version);
+                if manual {
+                    self.answer_manual(&text);
+                } else if self.announced.as_deref() != Some(&version) {
+                    self.balloon(&text, true);
                 }
+                self.announced = Some(version.clone());
+                self.update_status = UpdateStatus::Available(version);
                 self.available = Some(release);
             }
-            Ok(_) => {
+            Ok(release) => {
+                log(&format!(
+                    "update check ({kind}): up to date ({})",
+                    release.tag
+                ));
                 self.available = None;
+                let current = update::current_version();
+                self.update_status = UpdateStatus::UpToDate(current.to_string());
                 if manual {
-                    let text = tr_with(self.lang, Key::UpToDate, update::current_version());
-                    self.balloon(&text);
+                    self.answer_manual(&tr_with(self.lang, Key::UpToDate, current));
                 }
             }
-            // Automatic checks fail silently (offline, rate limit).
-            Err(e) if manual => self.balloon(&tr_with(self.lang, Key::UpdateFailed, &e)),
-            Err(_) => {}
+            Err(e) => {
+                log(&format!("update check ({kind}): failed: {e}"));
+                if manual {
+                    self.answer_manual(&tr_with(self.lang, Key::UpdateFailed, &e));
+                }
+                self.update_status = UpdateStatus::Failed(e);
+            }
         }
+        self.update_settings();
     }
 
     fn on_installed(&mut self, result: Result<PathBuf, InstallError>) {
         let error = match result {
             Ok(exe) => match updater::restart(&exe) {
                 // The new exe waits for this process to exit; close like Exit does.
-                Ok(()) => return self.on_menu(ID_EXIT),
+                Ok(()) => {
+                    log("update install: ok, restarting");
+                    return self.on_menu(ID_EXIT);
+                }
                 Err(e) => e,
             },
-            Err(InstallError::NotWritable) => String::new(),
+            Err(InstallError::NotWritable) => {
+                log("update install: folder not writable");
+                String::new()
+            }
             Err(InstallError::Failed(e)) => e,
         };
         if !error.is_empty() {
-            self.balloon(&tr_with(self.lang, Key::UpdateFailed, &error));
+            log(&format!("update install: failed: {error}"));
+            self.balloon(&tr_with(self.lang, Key::UpdateFailed, &error), false);
+            self.update_status = UpdateStatus::Failed(error);
+            self.update_settings();
         }
         // Nothing (more) to do automatically: offer the manual download.
         if let Some(release) = &self.available {
@@ -838,6 +933,12 @@ impl App {
 
     /// Reload the config from disk (manual edits apply) and scan again.
     fn rescan(&mut self) {
+        // A rescan the user (or a system event) asked for starts the backoff afresh.
+        self.retry_step = 0;
+        self.rescan_now();
+    }
+
+    fn rescan_now(&mut self) {
         flyout::hide();
         // SAFETY: plain timer call on our own window.
         unsafe {
@@ -1008,6 +1109,20 @@ impl App {
                 }
             }
             TIMER_RESCAN => self.rescan(),
+            TIMER_RETRY => {
+                // SAFETY: plain timer call on our own window (one-shot).
+                unsafe {
+                    let _ = KillTimer(Some(self.hwnd), TIMER_RETRY);
+                }
+                self.rescan_now();
+            }
+            TIMER_START => {
+                // SAFETY: plain timer call on our own window (one-shot).
+                unsafe {
+                    let _ = KillTimer(Some(self.hwnd), TIMER_START);
+                }
+                self.scan();
+            }
             TIMER_UPDATE => self.maybe_auto_check(),
             #[cfg(feature = "plus")]
             auto::TIMER_AUTO => self.auto_replan(),
@@ -1240,6 +1355,8 @@ impl App {
         Snapshot {
             config: self.config.clone(),
             lang: self.lang,
+            update: self.update_status.clone(),
+            config_path: self.path.display().to_string(),
             monitors,
             #[cfg(feature = "plus")]
             sensor_available: auto::sensor_available(),
@@ -1284,6 +1401,12 @@ impl App {
             }
             A::CheckUpdates(on) => self.config.general.check_updates = on,
             A::CheckNow => self.start_check(true),
+            A::Install => self.install_update(),
+            A::OpenFolder => {
+                if let Some(dir) = self.path.parent() {
+                    util::open_with_default_app(dir);
+                }
+            }
             A::TrayStyle(style) => {
                 self.config.general.tray_style = style;
                 self.refresh_all();
@@ -1766,6 +1889,9 @@ fn show_menu(hwnd: HWND, x: i32, y: i32, state: &MenuState) -> u32 {
             );
         }
         add(MENU_ITEM_FLAGS(0), ID_CHECK_UPDATES, Key::MenuCheckUpdates);
+        if state.update_to.is_some() {
+            let _ = SetMenuDefaultItem(menu, ID_UPDATE, 0);
+        }
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         add(MENU_ITEM_FLAGS(0), ID_EXIT, Key::MenuExit);
 
@@ -1965,8 +2091,9 @@ fn create_window() -> Option<HWND> {
 // ---------------------------------------------------------------------------
 
 /// Run the tray app until Exit/`quit`. `initial` are CLI commands to apply once
-/// monitors are known; `updated`: this start follows a self-update. Returns the process exit code.
-pub fn run(config_path: PathBuf, initial: Vec<Command>, updated: bool) -> i32 {
+/// monitors are known; `updated`: this start follows a self-update; `autostart`: started by
+/// Windows at logon (the first scan waits a moment for DDC/CI to come up). Returns the process exit code.
+pub fn run(config_path: PathBuf, initial: Vec<Command>, updated: bool, autostart: bool) -> i32 {
     // SAFETY: process-wide setup on the UI thread before any window exists. DPI failure
     // is fine (the manifest sets it too).
     unsafe {
@@ -2000,10 +2127,15 @@ pub fn run(config_path: PathBuf, initial: Vec<Command>, updated: bool) -> i32 {
 
     let app = App::new(hwnd, config_path, config, renderer, initial, updated);
     APP.with(|cell| *cell.borrow_mut() = Some(app));
-    with_app(App::scan);
     // SAFETY: plain timer call on our own window.
     unsafe {
+        if autostart {
+            SetTimer(Some(hwnd), TIMER_START, startup::AUTOSTART_DELAY_MS, None);
+        }
         SetTimer(Some(hwnd), TIMER_UPDATE, UPDATE_POLL_MS, None);
+    }
+    if !autostart {
+        with_app(App::scan);
     }
 
     let mut msg = MSG::default();

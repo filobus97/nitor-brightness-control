@@ -84,7 +84,7 @@ pub fn fix_stale() -> bool {
     match startup::classify_run(&cur, &exe_path().to_string_lossy()) {
         RunEntry::Current => false,
         RunEntry::NeedsFlag => {
-            write();
+            let _ = write();
             false
         }
         RunEntry::Stale => write() == ERROR_SUCCESS,
