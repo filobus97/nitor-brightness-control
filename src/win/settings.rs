@@ -122,6 +122,7 @@ pub struct Snapshot {
     pub update: UpdateStatus,
     /// The config file in use (`Nitor.log` is next to it).
     pub config_path: String,
+    pub log_path: String,
     /// Known monitors in tray order.
     pub monitors: Vec<MonitorInfo>,
     /// Plus: this PC has an ambient light sensor.
@@ -196,7 +197,7 @@ pub enum Action {
     RefreshOnOpen(bool),
     WriteInterval(u32),
     OpenConfig,
-    OpenFolder,
+    OpenLog,
     /// A monitor, by stable ID.
     Monitor(String, MonitorEdit),
     #[cfg(feature = "plus")]
@@ -386,7 +387,7 @@ enum Btn {
     CheckNow,
     Install,
     OpenConfig,
-    OpenFolder,
+    OpenLog,
     /// The color dot of monitor `i`: opens its palette.
     Color(usize),
     Up(usize),
@@ -872,11 +873,16 @@ impl State {
         b.label(row, b.left(row), slider.l, t(Key::LblWriteInterval), None);
         b.button_row(
             Btn::OpenConfig,
-            210.0,
+            110.0,
             t(Key::LblConfigFile),
             Some(self.snap.config_path.clone()),
         );
-        b.button_row(Btn::OpenFolder, 210.0, t(Key::LblLogFolder), None);
+        b.button_row(
+            Btn::OpenLog,
+            110.0,
+            t(Key::LblLogFile),
+            Some(self.snap.log_path.clone()),
+        );
         b.end_card(0.0);
 
         Layout {
@@ -1181,7 +1187,7 @@ impl State {
                 Btn::CheckNow => Some(Action::CheckNow),
                 Btn::Install => Some(Action::Install),
                 Btn::OpenConfig => Some(Action::OpenConfig),
-                Btn::OpenFolder => Some(Action::OpenFolder),
+                Btn::OpenLog => Some(Action::OpenLog),
                 Btn::Color(i) => {
                     let id = self.snap.monitors.get(i)?.id.clone();
                     self.picker = if self.picker.as_ref() == Some(&id) {
@@ -1932,8 +1938,7 @@ impl State {
                 let key = match b {
                     Btn::CheckNow => Key::BtnCheckNow,
                     Btn::Install => Key::BtnInstall,
-                    Btn::OpenFolder => Key::BtnOpenFolder,
-                    _ => Key::BtnOpenConfig,
+                    _ => Key::BtnOpen,
                 };
                 self.draw_button(cv, r, tr(self.lang(), key), hot);
             }

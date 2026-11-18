@@ -1357,6 +1357,7 @@ impl App {
             lang: self.lang,
             update: self.update_status.clone(),
             config_path: self.path.display().to_string(),
+            log_path: self.path.with_file_name("Nitor.log").display().to_string(),
             monitors,
             #[cfg(feature = "plus")]
             sensor_available: auto::sensor_available(),
@@ -1402,10 +1403,13 @@ impl App {
             A::CheckUpdates(on) => self.config.general.check_updates = on,
             A::CheckNow => self.start_check(true),
             A::Install => self.install_update(),
-            A::OpenFolder => {
-                if let Some(dir) = self.path.parent() {
-                    util::open_with_default_app(dir);
+            A::OpenLog => {
+                // Open Nitor.log itself, like the config file (created empty if missing).
+                let log = self.path.with_file_name("Nitor.log");
+                if !log.exists() {
+                    let _ = std::fs::write(&log, b"");
                 }
+                util::open_with_default_app(&log);
             }
             A::TrayStyle(style) => {
                 self.config.general.tray_style = style;
