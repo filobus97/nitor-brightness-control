@@ -21,6 +21,8 @@ use super::util::log;
 use super::wheel::{self, WM_APP_WHEEL, WheelEvent};
 use super::wmi::{self, Wmi};
 use super::{autostart, util};
+#[cfg(feature = "plus")]
+use crate::auto::color::{MAX_K, UI_MIN_K, WARM_LIMIT_K};
 use crate::cli::{self, BrightnessOp, Command, Target};
 use crate::color::{Rgb, next_palette_color};
 #[cfg(feature = "plus")]
@@ -114,6 +116,12 @@ struct Row {
     internal: bool,
     /// Built-in panel left alone because `internal_display` is off.
     internal_disabled: bool,
+    /// GDI device name, e.g. `\\.\DISPLAY1`.
+    #[cfg(feature = "plus")]
+    device_name: String,
+    /// HDR / advanced colour is on.
+    #[cfg(feature = "plus")]
+    hdr: bool,
 }
 
 impl Row {
@@ -208,6 +216,10 @@ fn build_entries(
                 active: false,
                 internal: f.internal,
                 internal_disabled: usable && f.internal && !config.general.internal_display,
+                #[cfg(feature = "plus")]
+                device_name: f.device_name,
+                #[cfg(feature = "plus")]
+                hdr: f.advanced_color,
             },
             backend,
         });
@@ -422,6 +434,9 @@ struct App {
     /// Nitor Plus automation engine.
     #[cfg(feature = "plus")]
     auto: auto::Engine,
+    /// Nitor Plus colour temperature.
+    #[cfg(feature = "plus")]
+    color: auto::ColorEngine,
 }
 
 thread_local! {
@@ -490,6 +505,8 @@ impl App {
             announced: None,
             #[cfg(feature = "plus")]
             auto: auto::Engine::new(hwnd),
+            #[cfg(feature = "plus")]
+            color: auto::ColorEngine::new(hwnd),
         }
     }
 
@@ -513,6 +530,9 @@ impl App {
         if self.placeholder.take().is_some() {
             tray::remove(self.hwnd, PLACEHOLDER_UID);
         }
+        // Monitors and displays go back to their own colors before the workers stop.
+        #[cfg(feature = "plus")]
+        self.color.release(&color_views(&self.monitors));
         self.monitors.clear();
         lock(&self.queue).clear();
         self.stop_wheel();
@@ -608,6 +628,15 @@ impl App {
     }
 
     fn apply_event(&mut self, i: usize, event: DdcEvent) {
+        #[cfg(feature = "plus")]
+        if let DdcEvent::GainsReady | DdcEvent::GainsUnavailable = event {
+            let id = &self.monitors[i].row.id;
+            if self.color.on_gains(id, event == DdcEvent::GainsReady) {
+                self.color_replan();
+            }
+            self.update_settings();
+            return;
+        }
         let m = &mut self.monitors[i];
         if m.worker.is_none() {
             return;
@@ -640,6 +669,8 @@ impl App {
             DdcEvent::Written(_) => m.health = Health::Ok,
             DdcEvent::Unresponsive => m.health = Health::Unresponsive,
             DdcEvent::ReadOnly => m.health = Health::ReadOnly,
+            #[cfg(feature = "plus")]
+            DdcEvent::GainsReady | DdcEvent::GainsUnavailable => {}
         }
         self.refresh(i);
     }
@@ -982,6 +1013,8 @@ impl App {
             auto::TIMER_AUTO => self.auto_replan(),
             #[cfg(feature = "plus")]
             auto::TIMER_SENSOR => self.auto_sensor_settled(),
+            #[cfg(feature = "plus")]
+            auto::TIMER_COLOR => self.color_replan(),
             _ => {}
         }
     }
@@ -1199,6 +1232,8 @@ impl App {
                     color: m.row.color,
                     state,
                     internal: m.row.internal,
+                    #[cfg(feature = "plus")]
+                    color_method: self.color.method(&m.row.id),
                 }
             })
             .collect();
@@ -1208,11 +1243,17 @@ impl App {
             monitors,
             #[cfg(feature = "plus")]
             sensor_available: auto::sensor_available(),
+            #[cfg(feature = "plus")]
+            weather_status: self.auto.weather_status(),
             // Only a built-in panel can clash with Windows' adaptive brightness.
             #[cfg(feature = "plus")]
             adaptive_conflict: self.config.auto.enabled
                 && self.monitors.iter().any(|m| m.row.internal && m.row.active)
                 && auto::adaptive_brightness_on(),
+            #[cfg(feature = "plus")]
+            warm_range_ok: auto::gamma_range_extended(),
+            #[cfg(feature = "plus")]
+            night_light: self.config.auto.color_enabled && auto::night_light_active(),
         }
     }
 
@@ -1480,6 +1521,20 @@ impl App {
         for (i, value) in self.auto.plan(&self.config, &views) {
             self.set_value(i, BrightnessOp::Set(value));
         }
+        self.color_replan();
+    }
+
+    /// Plan the colour temperature (once the first probe is done). Pausing automation or
+    /// switching it off puts the colors back to neutral.
+    fn color_replan(&mut self) {
+        if !self.probe_done {
+            return;
+        }
+        self.color.plan(
+            &self.config,
+            &color_views(&self.monitors),
+            self.auto.pause_until(),
+        );
     }
 
     /// A change from the Settings window; `on_settings` saves and replans afterwards.
@@ -1491,6 +1546,17 @@ impl App {
             E::Day(v) => a.day_brightness = v.min(100),
             E::Night(v) => a.night_brightness = v.min(100),
             E::UseSensor(on) => a.use_sensor = on,
+            E::ColorEnabled(on) => a.color_enabled = on,
+            E::DayKelvin(k) => a.day_kelvin = k.clamp(color_floor(a.experimental_warm), MAX_K),
+            E::NightKelvin(k) => a.night_kelvin = k.clamp(color_floor(a.experimental_warm), MAX_K),
+            E::Warm(on) => {
+                a.experimental_warm = on;
+                let floor = color_floor(on);
+                (a.day_kelvin, a.night_kelvin) =
+                    (a.day_kelvin.max(floor), a.night_kelvin.max(floor));
+            }
+            E::WarmRange => auto::request_warm_range(self.hwnd),
+            E::Weather(on) => a.weather = on,
             E::Override(mode) => a.override_mode = mode,
             E::Source(source) => a.location_source = source,
             E::Latitude(v) => a.latitude = Some(v),
@@ -1514,6 +1580,13 @@ impl App {
         }
     }
 
+    /// A weather fetch finished: plan with the new forecast and refresh the Settings status.
+    fn auto_weather(&mut self) {
+        self.auto.on_weather();
+        self.auto_replan();
+        self.update_settings();
+    }
+
     /// Store a location found by Windows into the config.
     fn auto_location(&mut self) {
         if let Some((lat, lon)) = self.auto.on_location(&self.config.auto) {
@@ -1525,6 +1598,31 @@ impl App {
             }
         }
         self.auto_replan();
+    }
+}
+
+/// The colour engine's view of the monitors.
+#[cfg(feature = "plus")]
+fn color_views(monitors: &[Monitor]) -> Vec<auto::ColorView<'_>> {
+    monitors
+        .iter()
+        .map(|m| auto::ColorView {
+            id: &m.row.id,
+            device_name: &m.row.device_name,
+            // External monitors only: built-in panels (WMI) take the gamma path.
+            ddc: m.worker.as_ref().filter(|_| !m.row.internal),
+            hdr: m.row.hdr,
+        })
+        .collect()
+}
+
+/// Warmest temperature the sliders accept.
+#[cfg(feature = "plus")]
+fn color_floor(experimental_warm: bool) -> u32 {
+    if experimental_warm {
+        UI_MIN_K
+    } else {
+        WARM_LIMIT_K
     }
 }
 
@@ -1591,7 +1689,10 @@ fn on_tray(hwnd: HWND, ev: TrayEvent) {
                 return;
             };
             #[cfg(feature = "plus")]
-            let auto_pause = with_app(|a| a.config.auto.enabled.then(|| a.auto.paused())).flatten();
+            let auto_pause = with_app(|a| {
+                (a.config.auto.enabled || a.config.auto.color_enabled).then(|| a.auto.paused())
+            })
+            .flatten();
             // The menu runs a nested message loop: the app must not be borrowed meanwhile.
             let menu = MenuState {
                 lang,
@@ -1616,7 +1717,7 @@ struct MenuState {
     internal: Option<bool>,
     /// Version offered by the "Update to" item, if a newer release is known.
     update_to: Option<String>,
-    /// Plus with automation on: `Some(paused)` shows "Pause automation" / "Resume automation".
+    /// Plus with automation (brightness or color) on: `Some(paused)` shows "Pause automation" / "Resume automation".
     #[cfg(feature = "plus")]
     auto_pause: Option<bool>,
 }
@@ -1764,8 +1865,20 @@ unsafe extern "system" fn wnd_proc(
             with_app(App::auto_sensor);
         }
         #[cfg(feature = "plus")]
+        auto::WM_APP_AUTO_WEATHER => {
+            with_app(App::auto_weather);
+        }
+        #[cfg(feature = "plus")]
         auto::WM_APP_AUTO_LOCATION => {
             with_app(App::auto_location);
+        }
+        // The administrator prompt for the extended gamma range is over: look again.
+        #[cfg(feature = "plus")]
+        auto::WM_APP_AUTO_COLOR => {
+            with_app(|a| {
+                a.color_replan();
+                a.update_settings();
+            });
         }
         // Clock or time zone changed: sun times shift.
         #[cfg(feature = "plus")]

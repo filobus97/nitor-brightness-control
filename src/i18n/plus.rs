@@ -6,6 +6,19 @@ use super::Lang;
 pub enum PlusKey {
     SecAutomation,
     SecLocation,
+    SecColor,
+    ColorEnabled,
+    ColorEnabledHint,
+    ColorDay,
+    ColorNight,
+    ColorWarm,
+    ColorWarmNote,
+    ColorWarmBtn,
+    ColorNightLightNote,
+    ColorNightLightBtn,
+    ColorMethodHw,
+    ColorMethodGamma,
+    ColorMethodHdr,
     AutoEnabled,
     AutoEnabledHint,
     AutoDay,
@@ -13,6 +26,12 @@ pub enum PlusKey {
     /// Note under the two level sliders.
     AutoLevelsNote,
     AutoSensor,
+    AutoWeather,
+    AutoWeatherHint,
+    /// `{}` twice: the time (HH:MM) and the cloud cover in percent.
+    AutoWeatherOk,
+    /// `{}` is the error.
+    AutoWeatherFailed,
     AutoAdaptiveTitle,
     AutoAdaptiveNote,
     AutoAdaptiveBtn,
@@ -49,12 +68,29 @@ pub enum PlusKey {
 pub const ALL: &[PlusKey] = &[
     PlusKey::SecAutomation,
     PlusKey::SecLocation,
+    PlusKey::SecColor,
+    PlusKey::ColorEnabled,
+    PlusKey::ColorEnabledHint,
+    PlusKey::ColorDay,
+    PlusKey::ColorNight,
+    PlusKey::ColorWarm,
+    PlusKey::ColorWarmNote,
+    PlusKey::ColorWarmBtn,
+    PlusKey::ColorNightLightNote,
+    PlusKey::ColorNightLightBtn,
+    PlusKey::ColorMethodHw,
+    PlusKey::ColorMethodGamma,
+    PlusKey::ColorMethodHdr,
     PlusKey::AutoEnabled,
     PlusKey::AutoEnabledHint,
     PlusKey::AutoDay,
     PlusKey::AutoNight,
     PlusKey::AutoLevelsNote,
     PlusKey::AutoSensor,
+    PlusKey::AutoWeather,
+    PlusKey::AutoWeatherHint,
+    PlusKey::AutoWeatherOk,
+    PlusKey::AutoWeatherFailed,
     PlusKey::AutoAdaptiveTitle,
     PlusKey::AutoAdaptiveNote,
     PlusKey::AutoAdaptiveBtn,
@@ -91,6 +127,21 @@ pub fn tr(lang: Lang, key: PlusKey) -> &'static str {
         Lang::En => match key {
             K::SecAutomation => "Automation",
             K::SecLocation => "Location",
+            K::SecColor => "Color temperature (experimental)",
+            K::ColorEnabled => "Automatic color temperature",
+            K::ColorEnabledHint => "Warmer light after sunset, like f.lux.",
+            K::ColorDay => "Day temperature",
+            K::ColorNight => "Night temperature",
+            K::ColorWarm => "Allow warmer than 4000 K (experimental)",
+            K::ColorWarmNote => {
+                "Windows blocks gamma colors below 4000 K until a one-time registry change is made; you may need to sign out and in. Monitors set through their own RGB gains are not affected."
+            }
+            K::ColorWarmBtn => "Enable (needs administrator)",
+            K::ColorNightLightNote => "Windows Night Light is on and also tints the screen.",
+            K::ColorNightLightBtn => "Night light settings",
+            K::ColorMethodHw => "Hardware (DDC)",
+            K::ColorMethodGamma => "Gamma",
+            K::ColorMethodHdr => "HDR: not supported",
             K::AutoEnabled => "Automatic brightness",
             K::AutoEnabledHint => "Follows sunrise and sunset at your location.",
             K::AutoDay => "Day level",
@@ -99,6 +150,12 @@ pub fn tr(lang: Lang, key: PlusKey) -> &'static str {
                 "Each monitor follows these levels through its Link-all calibration range."
             }
             K::AutoSensor => "Use the light sensor",
+            K::AutoWeather => "Adjust for cloudy weather (uses Open-Meteo)",
+            K::AutoWeatherHint => {
+                "Sends only your approximate location (about 10 km) every few hours"
+            }
+            K::AutoWeatherOk => "Last update: {}, cloud cover {}%",
+            K::AutoWeatherFailed => "Weather update failed: {}",
             K::AutoAdaptiveTitle => "Windows adaptive brightness",
             K::AutoAdaptiveNote => {
                 "Windows also adjusts the built-in display automatically; turn one off to avoid conflicts."
@@ -135,6 +192,23 @@ pub fn tr(lang: Lang, key: PlusKey) -> &'static str {
         Lang::It => match key {
             K::SecAutomation => "Automazione",
             K::SecLocation => "Posizione",
+            K::SecColor => "Temperatura colore (sperimentale)",
+            K::ColorEnabled => "Temperatura colore automatica",
+            K::ColorEnabledHint => "Luce più calda dopo il tramonto, come f.lux.",
+            K::ColorDay => "Temperatura diurna",
+            K::ColorNight => "Temperatura notturna",
+            K::ColorWarm => "Consenti sotto 4000 K (sperimentale)",
+            K::ColorWarmNote => {
+                "Windows blocca i colori gamma sotto 4000 K finché non si modifica il registro (una volta); potrebbe servire uscire e rientrare. I monitor regolati con i propri guadagni RGB non sono interessati."
+            }
+            K::ColorWarmBtn => "Attiva (richiede amministratore)",
+            K::ColorNightLightNote => {
+                "La Luce notturna di Windows è attiva e colora lo schermo a sua volta."
+            }
+            K::ColorNightLightBtn => "Impostazioni luce notturna",
+            K::ColorMethodHw => "Hardware (DDC)",
+            K::ColorMethodGamma => "Gamma",
+            K::ColorMethodHdr => "HDR: non supportato",
             K::AutoEnabled => "Luminosità automatica",
             K::AutoEnabledHint => "Segue alba e tramonto nella tua posizione.",
             K::AutoDay => "Livello diurno",
@@ -143,6 +217,12 @@ pub fn tr(lang: Lang, key: PlusKey) -> &'static str {
                 "Ogni monitor segue questi livelli nel proprio intervallo di calibrazione di Collega tutti."
             }
             K::AutoSensor => "Usa il sensore di luce",
+            K::AutoWeather => "Adatta al meteo nuvoloso (usa Open-Meteo)",
+            K::AutoWeatherHint => {
+                "Invia solo la posizione approssimativa (circa 10 km) ogni poche ore"
+            }
+            K::AutoWeatherOk => "Ultimo aggiornamento: {}, nuvolosità {}%",
+            K::AutoWeatherFailed => "Aggiornamento meteo non riuscito: {}",
             K::AutoAdaptiveTitle => "Luminosità adattiva di Windows",
             K::AutoAdaptiveNote => {
                 "Windows regola automaticamente anche lo schermo integrato; disattiva uno dei due per evitare conflitti."

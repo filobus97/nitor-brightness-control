@@ -16,6 +16,7 @@
 //! * [`drive`]: per-monitor step combining plan, sensor level, link range and overrides.
 //! * [`color`]: kelvin to RGB multipliers and gamma ramps.
 //! * [`geocode`]: place-search URL and answer parsing.
+//! * [`weather`]: Open-Meteo cloud-cover forecast URL, parsing and lookups.
 //! * [`map`]: offline world map data and the picker's zoom/pan view.
 
 pub mod ambient;
@@ -26,3 +27,4 @@ pub mod geocode;
 pub mod map;
 pub mod plan;
 pub mod solar;
+pub mod weather;

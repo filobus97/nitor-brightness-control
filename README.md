@@ -5,7 +5,7 @@ Nitor is a lightweight, easy-to-use brightness control for external monitors on 
 It's a single portable `.exe` that sits in the notification area with **one tray icon per monitor**, each showing that monitor's brightness as a number in its own color. **Scroll over an icon** to change that monitor's brightness. Hardware brightness is set over DDC/CI, the same way the monitor's own buttons do it.
 
 - One small native exe: no installer, no runtime, no admin rights, no telemetry. The only network use is the update check (see [Updates](#updates)).
-- Brightness only, done well. No overlays or gamma tricks.
+- Brightness only, done well. No overlays or gamma tricks (color temperature is an opt-in Nitor Plus feature).
 - Windows 10 (1809+) and Windows 11, x64 and ARM64.
 - English and Italian, following the Windows display language.
 
@@ -25,13 +25,17 @@ Windows 11 hides new tray icons in the overflow menu. To keep Nitor's icons visi
 ## Editions
 
 - **Nitor** (`Nitor-x64.exe`, `Nitor-arm64.exe`): per-monitor brightness, everything described here.
-- **Nitor Plus** (`NitorPlus-x64.exe`, `NitorPlus-arm64.exe`): everything in Nitor plus automation features: automatic brightness (see below), with color temperature to follow.
+- **Nitor Plus** (`NitorPlus-x64.exe`, `NitorPlus-arm64.exe`): everything in Nitor plus automation features: automatic brightness and color temperature (see below).
 
 Each edition updates itself to the same edition's newer release. Build Plus with `cargo build --release --features plus`.
 
-### Nitor Plus: automatic brightness
+### Nitor Plus: automatic brightness and color temperature
 
-Set your location (or let Windows provide it) and the day and night brightness in **Settings → Automation**, and Nitor follows the sun: dim at night, bright by day, changing gradually around dawn and dusk, each monitor within its own linked range. If the PC has an ambient light sensor, Nitor can follow the room's light instead. If you change a monitor by hand, automation leaves it alone until the next sunrise or sunset (or for a set number of minutes); **Pause automation for 1 hour** in the tray menu stops it temporarily. Nitor stays idle in between: it sleeps until the next change is due and does nothing else. On a laptop, turn off Windows' own "Change brightness automatically when lighting changes" so the two don't compete. See [`docs/SPEC.md` §16](docs/SPEC.md#16-nitor-plus-automation).
+Set your location (or let Windows provide it) and the day and night brightness in **Settings → Automation**, and Nitor follows the sun: dim at night, bright by day, changing gradually around dawn and dusk, each monitor within its own linked range. If the PC has an ambient light sensor, Nitor can follow the room's light instead. If you change a monitor by hand, automation leaves it alone until the next sunrise or sunset (or for a set number of minutes); **Pause automation for 1 hour** in the tray menu stops it temporarily. Nitor stays idle in between: it sleeps until the next change is due and does nothing else. Optionally (off by default) Nitor can dim the day level a little on cloudy days, using the cloud-cover forecast from Open-Meteo: it sends only your approximate location (rounded to about 10 km), at most every 3 hours; the light sensor, when used, takes precedence. On a laptop, turn off Windows' own "Change brightness automatically when lighting changes" so the two don't compete. 
+
+**Color temperature (experimental).** Turn on *Automatic color temperature* in **Settings → Automation** and set a day and a night temperature (2700 to 6500 K); Nitor warms the screen after sunset on the same schedule, waking only when the color has moved by about 100 K. It uses the monitor's own RGB gains over DDC/CI when the monitor supports them (Nitor remembers the original values and puts them back when you turn it off, pause, or exit; gains are written at most every 5 minutes to spare the monitor's memory), and otherwise a gamma ramp, which is always used for the built-in display. Windows limits gamma ramps to 4000 K; going warmer needs *Allow warmer than 4000 K (experimental)*, a one-time registry change that asks for administrator rights (you may need to sign out and in). Displays in HDR are skipped. If Windows' own Night Light is on, Nitor shows a hint, since both would tint the screen. **Pause automation for 1 hour** restores neutral color until you resume.
+
+See [`docs/SPEC.md` §16](docs/SPEC.md#16-nitor-plus-automation).
 
 ## Usage
 
