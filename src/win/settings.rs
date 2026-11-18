@@ -96,6 +96,9 @@ pub struct MonitorInfo {
     pub state: MonitorState,
     /// Built-in (laptop) panel.
     pub internal: bool,
+    /// Plus: how its color temperature is set (`None` until decided or while off).
+    #[cfg(feature = "plus")]
+    pub color_method: Option<crate::auto::color::Method>,
 }
 
 /// Everything the window shows: the config plus what only the app knows.
@@ -111,6 +114,12 @@ pub struct Snapshot {
     /// Plus: Windows' own adaptive brightness is on and the built-in display is automated.
     #[cfg(feature = "plus")]
     pub adaptive_conflict: bool,
+    /// Plus: Windows accepts gamma ramps warmer than 4000 K (`GdiIcmGammaRange` is set).
+    #[cfg(feature = "plus")]
+    pub warm_range_ok: bool,
+    /// Plus: Windows Night Light is on while color automation is.
+    #[cfg(feature = "plus")]
+    pub night_light: bool,
     /// Plus: outcome of the last weather fetch.
     #[cfg(feature = "plus")]
     pub weather_status: crate::auto::weather::Status,
@@ -139,6 +148,14 @@ pub enum AutoEdit {
     Night(u8),
     UseSensor(bool),
     Weather(bool),
+    ColorEnabled(bool),
+    /// Day and night temperature in kelvin.
+    DayKelvin(u32),
+    NightKelvin(u32),
+    /// "Allow warmer than 4000 K (experimental)".
+    Warm(bool),
+    /// Enable the extended gamma range in the registry (asks for administrator rights).
+    WarmRange,
     Override(OverrideMode),
     Source(LocationSource),
     /// A typed coordinate, already validated.

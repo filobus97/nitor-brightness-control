@@ -112,4 +112,4 @@ jobs:
           # Creates the tag on this commit when it doesn't exist yet (manual run).
           gh release create "$TAG" *.exe SHA256SUMS.txt --target "$GITHUB_SHA" \
             --repo "$GITHUB_REPOSITORY" --title "Nitor $TAG" --generate-notes $prerelease \
-            --notes "**Download:** \`Nitor-x64.exe\` for most PCs (Intel/AMD) · \`Nitor-arm64.exe\` for ARM PCs (Snapdragon). Not sure? Settings → System → About → System type. **Nitor** controls brightness; **Nitor Plus** (\`NitorPlus-x64.exe\` / \`NitorPlus-arm64.exe\`) adds automatic brightness and color temperature, coming soon. Updates keep you on the edition you run."
+            --notes "**Download:** \`Nitor-x64.exe\` for most PCs (Intel/AMD) · \`Nitor-arm64.exe\` for ARM PCs (Snapdragon). Not sure? Settings → System → About → System type. **Nitor** controls brightness; **Nitor Plus** (\`NitorPlus-x64.exe\` / \`NitorPlus-arm64.exe\`) adds automatic brightness and color temperature. Updates keep you on the edition you run."

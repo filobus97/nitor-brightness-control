@@ -28,7 +28,7 @@ pub struct MonitorView {
     pub link: (u8, u8),
 }
 
-fn now_unix() -> i64 {
+pub(super) fn now_unix() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs() as i64)
@@ -76,6 +76,11 @@ impl Engine {
     /// Whether the global pause is running.
     pub fn paused(&self) -> bool {
         self.pause_until.is_some_and(|t| t > now_unix())
+    }
+
+    /// The unix time the global pause ends (`None`: not paused).
+    pub fn pause_until(&self) -> Option<i64> {
+        self.pause_until.filter(|&t| t > now_unix())
     }
 
     /// "Pause automation for 1 hour" / "Resume automation".
@@ -276,7 +281,10 @@ impl Engine {
 
     /// Ask Windows for the location when enabled and due (at most daily).
     fn sync_location(&mut self, auto: &Auto, now: i64) {
-        if !(auto.enabled && auto.location_source == LocationSource::Windows) {
+        // Color automation needs the location too.
+        if !((auto.enabled || auto.color_enabled)
+            && auto.location_source == LocationSource::Windows)
+        {
             // So that enabling it later asks right away.
             self.location_try = 0;
             return;

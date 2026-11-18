@@ -6,6 +6,8 @@ use crate::auto::geocode::{self, Place};
 use crate::auto::map::round2;
 use crate::win::geo;
 
+mod color;
+
 const PLACE_H: f32 = 40.0;
 const FIELD_W: f32 = 120.0;
 const SEARCH_FIELD_W: f32 = 170.0;
@@ -30,6 +32,8 @@ pub(super) enum AutoCtl {
     Adaptive,
     /// Search result `k`.
     Place(usize),
+    /// The color temperature controls.
+    Color(color::ColorCtl),
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -97,6 +101,8 @@ impl State {
             [AutoCtl::Override(0), AutoCtl::Override(1)],
         );
         b.end_card(SECTION_GAP);
+
+        self.color_layout(b);
 
         b.heading(Key::Plus(K::SecLocation));
         b.begin_card();
@@ -307,6 +313,7 @@ impl State {
                 util::open_url("ms-settings:display");
                 return None;
             }
+            AutoCtl::Color(c) => return self.color_press(layout, c, x),
             AutoCtl::Place(k) => {
                 let p = self.auto.places.get(k)?;
                 let edit = AutoEdit::Place(round2(p.latitude), round2(p.longitude));
@@ -327,6 +334,7 @@ impl State {
         let edit = match c {
             AutoCtl::Day => (v != a.day_brightness).then_some(AutoEdit::Day(v)),
             AutoCtl::Night => (v != a.night_brightness).then_some(AutoEdit::Night(v)),
+            AutoCtl::Color(c) => return self.color_drag(layout, c, x),
             _ => None,
         };
         edit.map(Action::Auto)
@@ -458,6 +466,7 @@ impl State {
             AutoCtl::Search | AutoCtl::Map | AutoCtl::Adaptive => {
                 self.draw_button(cv, r, &self.btn_label(c), hot)
             }
+            AutoCtl::Color(c) => self.draw_color(cv, c, r, hot),
             AutoCtl::Place(k) => {
                 let Some(p) = self.auto.places.get(k) else {
                     return;

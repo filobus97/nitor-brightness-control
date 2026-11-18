@@ -24,8 +24,10 @@ pub enum DdcEvent {
     /// Reads work but writes are rejected (game/HDR preset, driver lock).
     ReadOnly,
     /// Plus: the monitor answered to the red, green and blue video gains (colour by hardware).
+    #[cfg(feature = "plus")]
     GainsReady,
     /// Plus: the video gains are missing or rejected; colour must use gamma ramps.
+    #[cfg(feature = "plus")]
     GainsUnavailable,
 }
 
