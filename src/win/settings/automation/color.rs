@@ -64,11 +64,7 @@ impl State {
             }
             let pref = self.method_pref(i);
             let row = b.row(ROW_H);
-            let prefs = [
-                ColorMethodPref::Auto,
-                ColorMethodPref::Ddc,
-                ColorMethodPref::Gamma,
-            ];
+            let prefs = [ColorMethodPref::Gamma, ColorMethodPref::Ddc];
             let widths =
                 prefs.map(|p| self.method_seg_label(p).chars().count() as f32 * CHAR_W + 24.0);
             let g = b.slot(row, b.edge(row), widths.iter().sum(), SEG_H);
@@ -101,7 +97,6 @@ impl State {
 
     fn method_seg_label(&self, p: ColorMethodPref) -> String {
         self.pt(match p {
-            ColorMethodPref::Auto => PlusKey::ColorSegAuto,
             ColorMethodPref::Ddc => PlusKey::ColorSegHardware,
             ColorMethodPref::Gamma => PlusKey::ColorSegSoftware,
         })

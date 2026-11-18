@@ -23,8 +23,7 @@ pub enum PlusKey {
     ColorMethodGamma,
     ColorMethodHdr,
     ColorMethodUnsupported,
-    /// The choices Auto / Hardware / Software.
-    ColorSegAuto,
+    /// The choices Software / Hardware.
     ColorSegHardware,
     ColorSegSoftware,
     /// Note under the Hardware choice.
@@ -95,7 +94,6 @@ pub const ALL: &[PlusKey] = &[
     PlusKey::ColorMethodGamma,
     PlusKey::ColorMethodHdr,
     PlusKey::ColorMethodUnsupported,
-    PlusKey::ColorSegAuto,
     PlusKey::ColorSegHardware,
     PlusKey::ColorSegSoftware,
     PlusKey::ColorHwNote,
@@ -163,7 +161,6 @@ pub fn tr(lang: Lang, key: PlusKey) -> &'static str {
             K::ColorMethodGamma => "Using: Software (gamma)",
             K::ColorMethodHdr => "HDR: not supported",
             K::ColorMethodUnsupported => "Hardware not supported — using Software",
-            K::ColorSegAuto => "Auto",
             K::ColorSegHardware => "Hardware",
             K::ColorSegSoftware => "Software",
             K::ColorHwNote => "Most monitors apply this only in their User/Custom color mode",
@@ -239,7 +236,6 @@ pub fn tr(lang: Lang, key: PlusKey) -> &'static str {
             K::ColorMethodGamma => "In uso: Software (gamma)",
             K::ColorMethodHdr => "HDR: non supportato",
             K::ColorMethodUnsupported => "Hardware non supportato — uso Software",
-            K::ColorSegAuto => "Auto",
             K::ColorSegHardware => "Hardware",
             K::ColorSegSoftware => "Software",
             K::ColorHwNote => {

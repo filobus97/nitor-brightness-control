@@ -98,7 +98,7 @@ impl Default for MonitorSettings {
             link_max: 100,
             badge: None,
             hidden: false,
-            color_method: ColorMethodPref::Auto,
+            color_method: ColorMethodPref::Gamma,
             ddc_gains: None,
             ddc_gains_max: None,
         }
@@ -126,19 +126,17 @@ pub enum OverrideMode {
 pub enum ColorMethodPref {
     /// Software: a gamma ramp, which always works and never touches the monitor's memory.
     #[default]
-    Auto,
+    Gamma,
     /// RGB gains over DDC/CI, if the monitor really applies them.
     Ddc,
-    /// Software, chosen explicitly.
-    Gamma,
 }
 
 impl ColorMethodPref {
     fn parse(v: &str) -> ColorMethodPref {
         match v.trim().to_ascii_lowercase().as_str() {
             "ddc" | "hardware" => ColorMethodPref::Ddc,
-            "gamma" | "software" => ColorMethodPref::Gamma,
-            _ => ColorMethodPref::Auto,
+            // "gamma", "software", the retired "auto" and anything else.
+            _ => ColorMethodPref::Gamma,
         }
     }
 }
@@ -357,11 +355,8 @@ impl Config {
                 o += "hidden = true\n";
             }
             match m.color_method {
-                ColorMethodPref::Auto => {}
-                ColorMethodPref::Ddc => o += "color_method = ddc          ; auto | ddc | gamma\n",
-                ColorMethodPref::Gamma => {
-                    o += "color_method = gamma          ; auto | ddc | gamma\n"
-                }
+                ColorMethodPref::Ddc => o += "color_method = ddc          ; gamma | ddc\n",
+                ColorMethodPref::Gamma => o += "color_method = gamma        ; gamma | ddc\n",
             }
             for (key, gains) in [
                 ("ddc_gains", m.ddc_gains),
@@ -759,14 +754,14 @@ mod tests {
         assert_eq!(c.general.tray_style, TrayStyle::Text);
         assert_eq!(c.monitors["M"].color, None);
         assert_eq!(c.monitors["M"].max, 100);
-        assert_eq!(c.monitors["M"].color_method, ColorMethodPref::Auto);
+        assert_eq!(c.monitors["M"].color_method, ColorMethodPref::Gamma);
         for (text, want) in [
             ("DDC", ColorMethodPref::Ddc),
             ("hardware", ColorMethodPref::Ddc),
             (" Gamma ", ColorMethodPref::Gamma),
             ("software", ColorMethodPref::Gamma),
-            ("auto", ColorMethodPref::Auto),
-            ("???", ColorMethodPref::Auto),
+            ("auto", ColorMethodPref::Gamma),
+            ("???", ColorMethodPref::Gamma),
         ] {
             let c = Config::parse(&format!("[monitor.M]\ncolor_method = {text}\n"));
             assert_eq!(c.monitors["M"].color_method, want, "{text}");
