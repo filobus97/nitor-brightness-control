@@ -13,10 +13,16 @@
 //! * [`curve`]: level as a function of elevation (brightness or kelvin), cloud dimming.
 //! * [`ambient`]: ambient-light sensor mapping, smoothing and hysteresis.
 //! * [`plan`]: scheduler decision, manual override and pause handling.
+//! * [`drive`]: per-monitor step combining plan, sensor level, link range and overrides.
 //! * [`color`]: kelvin to RGB multipliers and gamma ramps.
+//! * [`geocode`]: place-search URL and answer parsing.
+//! * [`map`]: offline world map data and the picker's zoom/pan view.
 
 pub mod ambient;
 pub mod color;
 pub mod curve;
+pub mod geocode;
+pub mod map;
+pub mod drive;
 pub mod plan;
 pub mod solar;

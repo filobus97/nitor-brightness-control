@@ -23,6 +23,9 @@ windows-numerics = "0.3"
 [target.'cfg(windows)'.dependencies.windows]
 version = "0.62"
 features = [
+    "Devices_Geolocation",
+    "Devices_Sensors",
+    "Foundation",
     "Win32_Devices_Display",
     "Win32_Foundation",
     "Win32_Globalization",

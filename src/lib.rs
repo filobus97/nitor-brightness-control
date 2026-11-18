@@ -12,6 +12,7 @@ pub mod config;
 pub mod display_id;
 pub mod hotkey;
 pub mod i18n;
+pub mod json;
 pub mod link;
 pub mod throttle;
 pub mod update;

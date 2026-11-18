@@ -6,6 +6,8 @@
 //! - `present`: render + add/modify one tray icon.
 //! - window creation, window procedure, context menu, and the `run`/`standalone` entry points.
 
+#[cfg(feature = "plus")]
+use super::auto::{self, MonitorView};
 use super::ddc::{self, Backend, DdcEvent, DdcWorker, Notify};
 use super::flyout::{self, Action, FlyoutRow};
 use super::icon::{self, IconContent, IconRenderer, IconSpec, OwnedIcon};
@@ -85,6 +87,8 @@ const ID_EXIT: u32 = 4;
 const ID_INTERNAL: u32 = 5;
 const ID_CHECK_UPDATES: u32 = 6;
 const ID_UPDATE: u32 = 7;
+#[cfg(feature = "plus")]
+const ID_AUTO_TOGGLE: u32 = 8;
 
 /// Registered `TaskbarCreated` message (0 until registered).
 static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
@@ -413,6 +417,9 @@ struct App {
     available: Option<Release>,
     /// The version last announced by balloon (once per version and session).
     announced: Option<String>,
+    /// Nitor Plus automation engine.
+    #[cfg(feature = "plus")]
+    auto: auto::Engine,
 }
 
 thread_local! {
@@ -479,6 +486,8 @@ impl App {
             update_busy: false,
             available: None,
             announced: None,
+            #[cfg(feature = "plus")]
+            auto: auto::Engine::new(hwnd),
         }
     }
 
@@ -660,6 +669,9 @@ impl App {
         for cmd in std::mem::take(&mut self.initial) {
             self.exec(&cmd);
         }
+        // Values are known now (startup, rescan, resume, display on): plan automation.
+        #[cfg(feature = "plus")]
+        self.auto_replan();
         util::trim_working_set();
     }
 
@@ -964,6 +976,10 @@ impl App {
             }
             TIMER_RESCAN => self.rescan(),
             TIMER_UPDATE => self.maybe_auto_check(),
+            #[cfg(feature = "plus")]
+            auto::TIMER_AUTO => self.auto_replan(),
+            #[cfg(feature = "plus")]
+            auto::TIMER_SENSOR => self.auto_sensor_settled(),
             _ => {}
         }
     }
@@ -995,20 +1011,36 @@ impl App {
         }
     }
 
-    /// Apply `op` to monitor `i`: update the value, redraw immediately, queue the DDC write.
+    /// A change by the user (wheel, flyout, CLI): apply `op` to monitor `i`; with Plus it
+    /// also holds automation off for that monitor.
     fn adjust(&mut self, i: usize, op: BrightnessOp) {
+        let changed = self.set_value(i, op);
+        #[cfg(feature = "plus")]
+        if changed {
+            self.auto
+                .user_change(&self.monitors[i].row.id, &self.config.auto);
+        }
+        #[cfg(not(feature = "plus"))]
+        let _ = changed;
+    }
+
+    /// Apply `op` to monitor `i`: update the value, redraw immediately, queue the DDC write.
+    /// True if the value changed. (Automation calls this directly: not a user override.)
+    fn set_value(&mut self, i: usize, op: BrightnessOp) -> bool {
         let s = settings_of(&self.config, &self.monitors[i].row.id);
         let m = &mut self.monitors[i];
         let (Some(current), Some(worker)) = (m.row.value, &m.worker) else {
-            return;
+            return false;
         };
         let new = op.apply(current, s.min, s.max);
-        if new != current {
-            m.row.value = Some(new);
-            m.last_adjust = Some(Instant::now());
-            worker.write(new);
-            self.refresh(i);
+        if new == current {
+            return false;
         }
+        m.row.value = Some(new);
+        m.last_adjust = Some(Instant::now());
+        worker.write(new);
+        self.refresh(i);
+        true
     }
 
     /// Left click: read every monitor again.
@@ -1219,6 +1251,9 @@ impl App {
             A::Monitor(id, edit) => self.edit_monitor(&id, edit),
         }
         self.save();
+        // Automation settings (or limits, ranges) may have changed: apply them now.
+        #[cfg(feature = "plus")]
+        self.auto_replan();
         self.update_settings();
     }
 
@@ -1275,6 +1310,11 @@ impl App {
             }
             ID_CHECK_UPDATES => self.start_check(true),
             ID_UPDATE => self.install_update(),
+            #[cfg(feature = "plus")]
+            ID_AUTO_TOGGLE => {
+                self.auto.toggle_pause();
+                self.auto_replan();
+            }
             ID_AUTOSTART => {
                 let _ = autostart::set(!autostart::is_enabled());
                 self.config.general.autostart = autostart::is_enabled();
@@ -1310,6 +1350,17 @@ impl App {
             .is_some_and(|t| t.elapsed() < OWN_CHANGE_WINDOW)
         {
             return;
+        }
+        // A change Nitor did not make (Fn keys, Windows adaptive brightness) is the user's
+        // word: automation steps back. Echoes of our own value equal the known one.
+        #[cfg(feature = "plus")]
+        if self.monitors[i]
+            .row
+            .value
+            .is_some_and(|v| v.abs_diff(percent) >= 2)
+        {
+            self.auto
+                .user_change(&self.monitors[i].row.id, &self.config.auto);
         }
         self.monitors[i].row.value = Some(percent.min(100));
         // Resync the worker's idea of the panel so the next wheel step is not skipped.
@@ -1393,6 +1444,59 @@ impl App {
     }
 }
 
+/// Nitor Plus automation glue; the logic lives in `super::auto` and `crate::auto`.
+#[cfg(feature = "plus")]
+impl App {
+    /// Plan automation for the current monitors and config, and apply the writes (as
+    /// automatic changes: they are not user overrides). Also the hook that makes settings
+    /// edits (`config.auto`) take effect: `on_settings` calls it after saving.
+    fn auto_replan(&mut self) {
+        let views: Vec<MonitorView> = self
+            .monitors
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| m.row.active && m.worker.is_some())
+            .filter_map(|(index, m)| {
+                let s = settings_of(&self.config, &m.row.id);
+                Some(MonitorView {
+                    index,
+                    id: m.row.id.clone(),
+                    value: m.row.value?,
+                    link: (s.link_min, s.link_max),
+                })
+            })
+            .collect();
+        for (i, value) in self.auto.plan(&self.config, &views) {
+            self.set_value(i, BrightnessOp::Set(value));
+        }
+    }
+
+    fn auto_sensor(&mut self) {
+        if self.auto.on_sensor() {
+            self.auto_replan();
+        }
+    }
+
+    fn auto_sensor_settled(&mut self) {
+        if self.auto.on_sensor_settle() {
+            self.auto_replan();
+        }
+    }
+
+    /// Store a location found by Windows into the config.
+    fn auto_location(&mut self) {
+        if let Some((lat, lon)) = self.auto.on_location(&self.config.auto) {
+            let a = &mut self.config.auto;
+            if (a.latitude, a.longitude) != (Some(lat), Some(lon)) {
+                (a.latitude, a.longitude) = (Some(lat), Some(lon));
+                self.save();
+                self.update_settings();
+            }
+        }
+        self.auto_replan();
+    }
+}
+
 /// Render `spec` and show it as tray icon `uid`, adding the icon the first time.
 /// Does nothing if neither the picture nor the tooltip changed.
 fn present(
@@ -1455,12 +1559,16 @@ fn on_tray(hwnd: HWND, ev: TrayEvent) {
             }) else {
                 return;
             };
+            #[cfg(feature = "plus")]
+            let auto_pause = with_app(|a| a.config.auto.enabled.then(|| a.auto.paused())).flatten();
             // The menu runs a nested message loop: the app must not be borrowed meanwhile.
             let menu = MenuState {
                 lang,
                 autostart: autostart::is_enabled(),
                 internal,
                 update_to,
+                #[cfg(feature = "plus")]
+                auto_pause,
             };
             let cmd = show_menu(hwnd, ev.x, ev.y, &menu);
             with_app(|a| a.on_menu(cmd));
@@ -1477,6 +1585,9 @@ struct MenuState {
     internal: Option<bool>,
     /// Version offered by the "Update to" item, if a newer release is known.
     update_to: Option<String>,
+    /// Plus with automation on: `Some(paused)` shows "Pause automation" / "Resume automation".
+    #[cfg(feature = "plus")]
+    auto_pause: Option<bool>,
 }
 
 /// Show the tray context menu at a screen point and return the chosen command id (0: none).
@@ -1504,6 +1615,15 @@ fn show_menu(hwnd: HWND, x: i32, y: i32, state: &MenuState) -> u32 {
         if let Some(on) = state.internal {
             let checked = if on { MF_CHECKED } else { MENU_ITEM_FLAGS(0) };
             add(checked, ID_INTERNAL, Key::MenuInternalDisplay);
+        }
+        #[cfg(feature = "plus")]
+        if let Some(paused) = state.auto_pause {
+            let key = if paused {
+                Key::MenuResumeAuto
+            } else {
+                Key::MenuPauseAuto
+            };
+            add(MENU_ITEM_FLAGS(0), ID_AUTO_TOGGLE, key);
         }
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         if let Some(v) = &state.update_to {
@@ -1538,7 +1658,11 @@ fn show_menu(hwnd: HWND, x: i32, y: i32, state: &MenuState) -> u32 {
 fn on_power(wparam: WPARAM, lparam: LPARAM) {
     match wparam.0 as u32 {
         PBT_APMRESUMEAUTOMATIC => {
-            with_app(|a| a.rescan_soon());
+            with_app(|a| {
+                #[cfg(feature = "plus")]
+                a.auto.resume();
+                a.rescan_soon();
+            });
         }
         PBT_POWERSETTINGCHANGE if lparam.0 != 0 => {
             let p = lparam.0 as *const POWERBROADCAST_SETTING;
@@ -1603,6 +1727,19 @@ unsafe extern "system" fn wnd_proc(
         }
         WM_APP_UPDATE => {
             with_app(App::on_update);
+        }
+        #[cfg(feature = "plus")]
+        auto::WM_APP_AUTO_SENSOR => {
+            with_app(App::auto_sensor);
+        }
+        #[cfg(feature = "plus")]
+        auto::WM_APP_AUTO_LOCATION => {
+            with_app(App::auto_location);
+        }
+        // Clock or time zone changed: sun times shift.
+        #[cfg(feature = "plus")]
+        windows::Win32::UI::WindowsAndMessaging::WM_TIMECHANGE => {
+            with_app(App::auto_replan);
         }
         WM_TIMER => {
             with_app(|a| a.on_timer(wparam.0));

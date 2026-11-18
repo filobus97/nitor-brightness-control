@@ -3,13 +3,18 @@
 //! - `monitors` + `ddc`: discovery, identity, DDC/CI worker threads.
 //! - `icon` + `theme`: tray icon rendering and taskbar/app theme.
 //! - `flyout` + `settings`: the Direct2D flyout and the Settings window.
-//! - `update`: WinHTTP release check and self-update.
+//! - `http` + `update`: WinHTTP GET helper; release check and self-update.
 //! - `tray`, `wheel`, `instance`, `autostart`, `util`: small Win32 wrappers.
 
 pub mod app;
+#[cfg(feature = "plus")]
+pub mod auto;
 pub mod autostart;
 pub mod ddc;
 pub mod flyout;
+#[cfg(feature = "plus")]
+pub mod geo;
+pub mod http;
 pub mod icon;
 pub mod instance;
 pub mod monitors;
