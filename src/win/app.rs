@@ -23,6 +23,8 @@ use super::wmi::{self, Wmi};
 use super::{autostart, util};
 use crate::cli::{self, BrightnessOp, Command, Target};
 use crate::color::{Rgb, next_palette_color};
+#[cfg(feature = "plus")]
+use crate::config::LocationSource;
 use crate::config::{Config, MonitorSettings};
 use crate::display_id::display_key;
 use crate::i18n::{Key, Lang, tr, tr_with};
@@ -1204,6 +1206,13 @@ impl App {
             config: self.config.clone(),
             lang: self.lang,
             monitors,
+            #[cfg(feature = "plus")]
+            sensor_available: auto::sensor_available(),
+            // Only a built-in panel can clash with Windows' adaptive brightness.
+            #[cfg(feature = "plus")]
+            adaptive_conflict: self.config.auto.enabled
+                && self.monitors.iter().any(|m| m.row.internal && m.row.active)
+                && auto::adaptive_brightness_on(),
         }
     }
 
@@ -1249,6 +1258,8 @@ impl App {
             }
             A::OpenConfig => self.open_config(),
             A::Monitor(id, edit) => self.edit_monitor(&id, edit),
+            #[cfg(feature = "plus")]
+            A::Auto(edit) => self.edit_auto(edit),
         }
         self.save();
         // Automation settings (or limits, ranges) may have changed: apply them now.
@@ -1468,6 +1479,26 @@ impl App {
             .collect();
         for (i, value) in self.auto.plan(&self.config, &views) {
             self.set_value(i, BrightnessOp::Set(value));
+        }
+    }
+
+    /// A change from the Settings window; `on_settings` saves and replans afterwards.
+    fn edit_auto(&mut self, edit: settings::AutoEdit) {
+        use settings::AutoEdit as E;
+        let a = &mut self.config.auto;
+        match edit {
+            E::Enabled(on) => a.enabled = on,
+            E::Day(v) => a.day_brightness = v.min(100),
+            E::Night(v) => a.night_brightness = v.min(100),
+            E::UseSensor(on) => a.use_sensor = on,
+            E::Override(mode) => a.override_mode = mode,
+            E::Source(source) => a.location_source = source,
+            E::Latitude(v) => a.latitude = Some(v),
+            E::Longitude(v) => a.longitude = Some(v),
+            E::Place(lat, lon) => {
+                (a.latitude, a.longitude) = (Some(lat), Some(lon));
+                a.location_source = LocationSource::Manual;
+            }
         }
     }
 

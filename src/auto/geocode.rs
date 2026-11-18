@@ -25,9 +25,13 @@ impl Place {
     /// `Rome, Lazio, Italy`: the parts that exist, without immediate repeats.
     pub fn label(&self) -> String {
         let mut parts: Vec<&str> = Vec::new();
-        for p in [Some(&self.name), self.admin1.as_ref(), self.country.as_ref()]
-            .into_iter()
-            .flatten()
+        for p in [
+            Some(&self.name),
+            self.admin1.as_ref(),
+            self.country.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
         {
             if parts.last() != Some(&p.as_str()) {
                 parts.push(p);
@@ -77,9 +81,11 @@ pub fn parse(json: &str) -> Option<Vec<Place>> {
     if let Some(Json::Arr(items)) = field(&top, "results") {
         for item in items.iter().take(MAX_RESULTS) {
             let Json::Obj(o) = item else { continue };
-            let (Some(Json::Num(latitude)), Some(Json::Num(longitude)), Some(name)) =
-                (field(o, "latitude"), field(o, "longitude"), field_str(o, "name"))
-            else {
+            let (Some(Json::Num(latitude)), Some(Json::Num(longitude)), Some(name)) = (
+                field(o, "latitude"),
+                field(o, "longitude"),
+                field_str(o, "name"),
+            ) else {
                 continue;
             };
             let postcodes = match field(o, "postcodes") {

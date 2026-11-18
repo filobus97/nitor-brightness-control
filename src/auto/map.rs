@@ -10,7 +10,7 @@ pub const MAX_ZOOM: f64 = 8.0;
 /// others are deltas to the previous one (wrapping). `None` if the data is truncated.
 pub fn decode_rings(data: &[u8]) -> Option<Vec<Vec<(f32, f32)>>> {
     let mut at = 0;
-    let mut u16_at = |at: &mut usize| {
+    let u16_at = |at: &mut usize| {
         let v = u16::from_le_bytes([*data.get(*at)?, *data.get(*at + 1)?]);
         *at += 2;
         Some(v)
@@ -130,7 +130,7 @@ mod tests {
         for &(lon, lat) in rings.iter().flatten() {
             assert!((-180.0..=180.0).contains(&lon) && (-90.0..=90.0).contains(&lat));
         }
-        // Rome is on land of some ring's bounding box; Antarctica reaches the south pole.
+        // Antarctica reaches the south pole.
         let min_lat = rings.iter().flatten().map(|p| p.1).fold(90.0, f32::min);
         assert!(min_lat < -80.0);
     }

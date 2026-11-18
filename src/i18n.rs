@@ -1,5 +1,10 @@
 //! UI strings. Add a language by adding a `Lang` variant and one arm per key in `tr`.
 
+#[cfg(feature = "plus")]
+mod plus;
+#[cfg(feature = "plus")]
+pub use plus::PlusKey;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum Lang {
     #[default]
@@ -111,6 +116,9 @@ pub enum Key {
     StateHidden,
     StateNotControllable,
     StateBuiltInOff,
+    /// Nitor Plus Settings strings.
+    #[cfg(feature = "plus")]
+    Plus(PlusKey),
 }
 
 /// All keys, for checks that every key is translated.
@@ -242,6 +250,8 @@ pub fn tr(lang: Lang, key: Key) -> &'static str {
             Key::StateHidden => "Hidden",
             Key::StateNotControllable => "Not controllable",
             Key::StateBuiltInOff => "Built-in display (control off)",
+            #[cfg(feature = "plus")]
+            Key::Plus(k) => plus::tr(Lang::En, k),
         },
         Lang::It => match key {
             Key::AppName => "Nitor",
@@ -308,6 +318,8 @@ pub fn tr(lang: Lang, key: Key) -> &'static str {
             Key::StateHidden => "Nascosto",
             Key::StateNotControllable => "Non controllabile",
             Key::StateBuiltInOff => "Schermo integrato (controllo disattivato)",
+            #[cfg(feature = "plus")]
+            Key::Plus(k) => plus::tr(Lang::It, k),
         },
     }
 }
@@ -322,6 +334,17 @@ mod tests {
             for &key in ALL_KEYS {
                 assert!(!tr(lang, key).is_empty(), "{lang:?} {key:?} is empty");
             }
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "plus")]
+    fn plus_keys_translated_in_every_language() {
+        for lang in [Lang::En, Lang::It] {
+            for &key in plus::ALL {
+                assert!(!plus::tr(lang, key).is_empty(), "{lang:?} {key:?} is empty");
+            }
+            assert!(plus::tr(lang, PlusKey::AutoOverrideMinutes).contains("{}"));
         }
     }
 

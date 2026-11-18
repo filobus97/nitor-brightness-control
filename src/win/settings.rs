@@ -8,6 +8,9 @@
 //!   and hit-testing both read it, and so does the placement of the EDIT children.
 //! - `State`: the thread-local state and its input methods.
 //! - painting, EDIT children, window procedure.
+//! - Nitor Plus: `automation` (the Automation and Location sections, place search) and
+//!   `mappick` (the offline map popup) are child modules, so they share this file's
+//!   private building blocks.
 //!
 //! Re-entrancy: `open`/`update` run while the app is borrowed, so they never call
 //! `on_action`. The window procedure releases the state borrow before it emits an action,
@@ -18,6 +21,10 @@ use super::theme::Theme;
 use super::util;
 use crate::color::{PALETTE, Rgb, text_on};
 use crate::config::{Config, MonitorSettings, TrayStyle};
+#[cfg(feature = "plus")]
+use crate::config::{LocationSource, OverrideMode};
+#[cfg(feature = "plus")]
+use crate::i18n::PlusKey;
 use crate::i18n::{Key, Lang, tr, tr_with};
 use crate::update;
 use std::cell::RefCell;
@@ -60,6 +67,11 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::{HRESULT, HSTRING, PCWSTR, w};
 use windows_numerics::{Matrix3x2, Vector2};
 
+#[cfg(feature = "plus")]
+mod automation;
+#[cfg(feature = "plus")]
+mod mappick;
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -93,6 +105,12 @@ pub struct Snapshot {
     pub lang: Lang,
     /// Known monitors in tray order.
     pub monitors: Vec<MonitorInfo>,
+    /// Plus: this PC has an ambient light sensor.
+    #[cfg(feature = "plus")]
+    pub sensor_available: bool,
+    /// Plus: Windows' own adaptive brightness is on and the built-in display is automated.
+    #[cfg(feature = "plus")]
+    pub adaptive_conflict: bool,
 }
 
 /// A change to one monitor's settings.
@@ -108,8 +126,26 @@ pub enum MonitorEdit {
     MoveDown,
 }
 
+/// Plus: a change to the `[auto]` settings.
+#[cfg(feature = "plus")]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum AutoEdit {
+    Enabled(bool),
+    /// Day and night levels, 0..=100.
+    Day(u8),
+    Night(u8),
+    UseSensor(bool),
+    Override(OverrideMode),
+    Source(LocationSource),
+    /// A typed coordinate, already validated.
+    Latitude(f64),
+    Longitude(f64),
+    /// A chosen place (search result or map point): both coordinates, source manual.
+    Place(f64, f64),
+}
+
 /// What the user asked for; delivered through the function given to [`init`].
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Action {
     Autostart(bool),
     /// `None`: follow Windows.
@@ -124,6 +160,8 @@ pub enum Action {
     OpenConfig,
     /// A monitor, by stable ID.
     Monitor(String, MonitorEdit),
+    #[cfg(feature = "plus")]
+    Auto(AutoEdit),
 }
 
 static ON_ACTION: OnceLock<fn(Action)> = OnceLock::new();
@@ -234,6 +272,9 @@ const WM_MOUSELEAVE: u32 = 0x02A3;
 /// An EDIT asks its parent to restore the model text (Esc); `lparam` is the EDIT.
 const WM_REVERT: u32 = WM_APP + 1;
 const EDIT_SUBCLASS: usize = 1;
+/// A place search finished (Plus).
+#[cfg(feature = "plus")]
+const WM_SEARCH_DONE: u32 = WM_APP + 2;
 /// `D2DERR_RECREATE_TARGET`: the render target must be recreated.
 const D2DERR_RECREATE_TARGET: HRESULT = HRESULT(0x8899000Cu32 as i32);
 
@@ -322,6 +363,8 @@ enum Ctl {
     Button(Btn),
     /// Palette swatch `k` of monitor `i`.
     Swatch(usize, usize),
+    #[cfg(feature = "plus")]
+    Auto(automation::AutoCtl),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -329,6 +372,13 @@ enum Kind {
     Alias,
     Badge,
     Hex,
+    /// Plus: global fields (their `Edit` has no monitor).
+    #[cfg(feature = "plus")]
+    Lat,
+    #[cfg(feature = "plus")]
+    Lon,
+    #[cfg(feature = "plus")]
+    Search,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -341,6 +391,8 @@ enum Handle {
 enum Drag {
     Interval,
     Handle(usize, Handle),
+    #[cfg(feature = "plus")]
+    Level(automation::AutoCtl),
 }
 
 enum Node {
@@ -363,6 +415,9 @@ enum Node {
     },
     /// Right-aligned value text.
     Value(String, Rect),
+    /// Wrapped caption text spanning a row.
+    #[cfg(feature = "plus")]
+    Note(String, Rect),
     Ctl(Ctl, Rect),
 }
 
@@ -491,9 +546,13 @@ impl Builder {
     }
 
     fn toggle_row(&mut self, t: Toggle, title: String, sub: Option<String>) {
+        self.switch_row(Ctl::Toggle(t), title, sub);
+    }
+
+    fn switch_row(&mut self, ctl: Ctl, title: String, sub: Option<String>) {
         let row = self.row(ROW_H);
         let c = self.slot(row, self.edge(row), SWITCH_W, SWITCH_H);
-        self.ctl(Ctl::Toggle(t), c);
+        self.ctl(ctl, c);
         self.label(row, self.left(row), c.l, title, sub);
     }
 
@@ -571,6 +630,9 @@ struct Fonts {
     value: IDWriteTextFormat,
     mid: IDWriteTextFormat,
     glyph: IDWriteTextFormat,
+    /// Caption that wraps over several lines.
+    #[cfg(feature = "plus")]
+    note: IDWriteTextFormat,
 }
 
 struct Target {
@@ -578,7 +640,8 @@ struct Target {
     brush: ID2D1SolidColorBrush,
 }
 
-/// A native EDIT child, placed over the `Field` node of its monitor.
+/// A native EDIT child, placed over the `Field` node of its monitor (Plus: an empty
+/// monitor is a global field, placed over the `Field` node with index 0).
 struct Edit {
     hwnd: HWND,
     mon: String,
@@ -614,6 +677,8 @@ struct State {
     tracking_leave: bool,
     /// Monitor (by ID) whose palette is open.
     picker: Option<String>,
+    #[cfg(feature = "plus")]
+    auto: automation::AutoUi,
 }
 
 thread_local! {
@@ -708,6 +773,9 @@ impl State {
             Some(t(Key::LblRefreshOnOpenHint)),
         );
         b.end_card(SECTION_GAP);
+
+        #[cfg(feature = "plus")]
+        self.automation_layout(&mut b);
 
         b.heading(Key::SecMonitors);
         if self.snap.monitors.is_empty() {
@@ -1033,6 +1101,8 @@ impl State {
                 Btn::Down(i) => self.monitor_action(i, MonitorEdit::MoveDown),
             },
             Ctl::Swatch(i, k) => self.monitor_action(i, MonitorEdit::Color(PALETTE[k])),
+            #[cfg(feature = "plus")]
+            Ctl::Auto(c) => self.auto_press(&layout, c, x),
         }
     }
 
@@ -1051,6 +1121,8 @@ impl State {
                 (ms != self.snap.config.general.write_interval_ms)
                     .then_some(Action::WriteInterval(ms))
             }
+            #[cfg(feature = "plus")]
+            Drag::Level(c) => self.auto_drag(layout, c, x),
             Drag::Handle(i, which) => {
                 let r = layout.rect_of(Ctl::Slider(Slide::Range(i)))?;
                 let v = (frac_at(r, s, x) * 100.0).round() as u8;
@@ -1090,6 +1162,10 @@ fn set_text(hwnd: HWND, text: &str) {
 impl State {
     /// The text an EDIT shows when it has no pending input.
     fn edit_text(&self, mon: &str, kind: Kind) -> String {
+        #[cfg(feature = "plus")]
+        if mon.is_empty() {
+            return self.global_edit_text(kind);
+        }
         let Some(i) = self.snap.monitors.iter().position(|m| m.id == mon) else {
             return String::new();
         };
@@ -1101,6 +1177,9 @@ impl State {
                 .map(String::from)
                 .unwrap_or_default(),
             Kind::Hex => self.snap.monitors[i].color.to_hex(),
+            // Global fields have no monitor and returned above.
+            #[cfg(feature = "plus")]
+            Kind::Lat | Kind::Lon | Kind::Search => String::new(),
         }
     }
 
@@ -1170,6 +1249,10 @@ impl State {
                 Kind::Alias => 32,
                 Kind::Badge => 2,
                 Kind::Hex => 7,
+                #[cfg(feature = "plus")]
+                Kind::Lat | Kind::Lon => 10,
+                #[cfg(feature = "plus")]
+                Kind::Search => 60,
             };
             SendMessageW(
                 hwnd,
@@ -1198,7 +1281,7 @@ impl State {
     fn sync_edits(&mut self, layout: &Layout) {
         let ids: Vec<String> = self.snap.monitors.iter().map(|m| m.id.clone()).collect();
         self.edits.retain(|e| {
-            let keep = ids.contains(&e.mon);
+            let keep = ids.contains(&e.mon) || e.mon.is_empty();
             if !keep {
                 // SAFETY: our own child window.
                 unsafe {
@@ -1216,14 +1299,20 @@ impl State {
                 }
             }
         }
+        #[cfg(feature = "plus")]
+        self.ensure_global_edits();
         let s = self.scale();
         // SAFETY: plain focus query.
         let focused = unsafe { GetFocus() };
         for e in &self.edits {
-            let field = ids
-                .iter()
-                .position(|id| id == &e.mon)
-                .and_then(|i| layout.field(i, e.kind));
+            // Global fields (empty monitor) use field index 0.
+            let field = if e.mon.is_empty() {
+                layout.field(0, e.kind)
+            } else {
+                ids.iter()
+                    .position(|id| id == &e.mon)
+                    .and_then(|i| layout.field(i, e.kind))
+            };
             // SAFETY: our own child windows.
             unsafe {
                 let Some(f) = field else {
@@ -1262,8 +1351,12 @@ impl State {
     }
 
     /// The EDIT lost focus: turn its text into an action. Unusable input is reverted.
-    fn commit(&self, edit: HWND) -> Option<Action> {
+    fn commit(&mut self, edit: HWND) -> Option<Action> {
         let e = self.edits.iter().find(|e| e.hwnd == edit)?;
+        #[cfg(feature = "plus")]
+        if e.mon.is_empty() {
+            return self.commit_global(edit);
+        }
         let i = self.snap.monitors.iter().position(|m| m.id == e.mon)?;
         let text = get_text(edit);
         let text = text.trim();
@@ -1280,6 +1373,9 @@ impl State {
             Kind::Hex => Rgb::from_hex(text)
                 .filter(|&c| c != self.snap.monitors[i].color)
                 .map(MonitorEdit::Color),
+            // Global fields returned above.
+            #[cfg(feature = "plus")]
+            Kind::Lat | Kind::Lon | Kind::Search => None,
         };
         if change.is_none() {
             self.restore_text(edit);
@@ -1455,99 +1551,125 @@ impl Canvas<'_> {
     }
 }
 
+/// The text formats at `dpi`.
+fn make_fonts(
+    dwrite: &IDWriteFactory,
+    text_font: &str,
+    icon_font: &str,
+    dpi: u32,
+) -> Option<Fonts> {
+    let s = dpi as f32 / 96.0;
+    let make = |family: &str, size: f32, weight, align| -> Option<IDWriteTextFormat> {
+        // SAFETY: factory call with valid arguments; the text format is ours.
+        unsafe {
+            let f = dwrite
+                .CreateTextFormat(
+                    &HSTRING::from(family),
+                    None,
+                    weight,
+                    DWRITE_FONT_STYLE_NORMAL,
+                    DWRITE_FONT_STRETCH_NORMAL,
+                    size * s,
+                    w!("en-us"),
+                )
+                .ok()?;
+            f.SetTextAlignment(align).ok()?;
+            f.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)
+                .ok()?;
+            f.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP).ok()?;
+            Some(f)
+        }
+    };
+    let (t, i) = (text_font, icon_font);
+    let (reg, semi) = (DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_WEIGHT_SEMI_BOLD);
+    let (lead, trail, mid) = (
+        DWRITE_TEXT_ALIGNMENT_LEADING,
+        DWRITE_TEXT_ALIGNMENT_TRAILING,
+        DWRITE_TEXT_ALIGNMENT_CENTER,
+    );
+    Some(Fonts {
+        body: make(t, 14.0, reg, lead)?,
+        semi: make(t, 14.0, semi, lead)?,
+        caption: make(t, 12.0, reg, lead)?,
+        value: make(t, 14.0, reg, trail)?,
+        mid: make(t, 14.0, reg, mid)?,
+        glyph: make(i, 16.0, reg, mid)?,
+        #[cfg(feature = "plus")]
+        note: {
+            let note = make(t, 12.0, reg, lead)?;
+            // SAFETY: our own text format.
+            unsafe { note.SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP).ok()? };
+            note
+        },
+    })
+}
+
+/// Create the render target of `hwnd` in `slot`, or resize the existing one.
+fn sync_target(
+    slot: &mut Option<Target>,
+    d2d: &ID2D1Factory,
+    hwnd: HWND,
+    mica: bool,
+) -> Option<()> {
+    let mut rc = RECT::default();
+    // SAFETY: valid window and out-pointer.
+    unsafe { GetClientRect(hwnd, &mut rc).ok()? };
+    let size = D2D_SIZE_U {
+        width: (rc.right - rc.left).max(1) as u32,
+        height: (rc.bottom - rc.top).max(1) as u32,
+    };
+    if let Some(t) = &*slot {
+        // SAFETY: valid render target.
+        unsafe {
+            if t.rt.GetPixelSize() != size {
+                t.rt.Resize(&size).ok()?;
+            }
+        }
+        return Some(());
+    }
+    let props = D2D1_RENDER_TARGET_PROPERTIES {
+        r#type: D2D1_RENDER_TARGET_TYPE_DEFAULT,
+        pixelFormat: D2D1_PIXEL_FORMAT {
+            format: DXGI_FORMAT_UNKNOWN,
+            alphaMode: if mica {
+                D2D1_ALPHA_MODE_PREMULTIPLIED
+            } else {
+                D2D1_ALPHA_MODE_IGNORE
+            },
+        },
+        dpiX: 96.0,
+        dpiY: 96.0,
+        usage: D2D1_RENDER_TARGET_USAGE_NONE,
+        minLevel: D2D1_FEATURE_LEVEL_DEFAULT,
+    };
+    let hwnd_props = D2D1_HWND_RENDER_TARGET_PROPERTIES {
+        hwnd,
+        pixelSize: size,
+        presentOptions: D2D1_PRESENT_OPTIONS_NONE,
+    };
+    // SAFETY: valid factory and property structs.
+    unsafe {
+        let rt = d2d.CreateHwndRenderTarget(&props, &hwnd_props).ok()?;
+        let brush = rt
+            .CreateSolidColorBrush(&color_f(Rgb::WHITE, 1.0), None)
+            .ok()?;
+        *slot = Some(Target { rt, brush });
+    }
+    Some(())
+}
+
 impl State {
     fn ensure_fonts(&mut self) -> Option<()> {
         if self.fonts.as_ref().is_some_and(|(dpi, _)| *dpi == self.dpi) {
             return Some(());
         }
-        let s = self.scale();
-        let make = |family: &str, size: f32, weight, align| -> Option<IDWriteTextFormat> {
-            // SAFETY: factory call with valid arguments; the text format is ours.
-            unsafe {
-                let f = self
-                    .dwrite
-                    .CreateTextFormat(
-                        &HSTRING::from(family),
-                        None,
-                        weight,
-                        DWRITE_FONT_STYLE_NORMAL,
-                        DWRITE_FONT_STRETCH_NORMAL,
-                        size * s,
-                        w!("en-us"),
-                    )
-                    .ok()?;
-                f.SetTextAlignment(align).ok()?;
-                f.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)
-                    .ok()?;
-                f.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP).ok()?;
-                Some(f)
-            }
-        };
-        let (t, i) = (self.text_font, self.icon_font);
-        let (reg, semi) = (DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_WEIGHT_SEMI_BOLD);
-        let (lead, trail, mid) = (
-            DWRITE_TEXT_ALIGNMENT_LEADING,
-            DWRITE_TEXT_ALIGNMENT_TRAILING,
-            DWRITE_TEXT_ALIGNMENT_CENTER,
-        );
-        let fonts = Fonts {
-            body: make(t, 14.0, reg, lead)?,
-            semi: make(t, 14.0, semi, lead)?,
-            caption: make(t, 12.0, reg, lead)?,
-            value: make(t, 14.0, reg, trail)?,
-            mid: make(t, 14.0, reg, mid)?,
-            glyph: make(i, 16.0, reg, mid)?,
-        };
+        let fonts = make_fonts(&self.dwrite, self.text_font, self.icon_font, self.dpi)?;
         self.fonts = Some((self.dpi, fonts));
         Some(())
     }
 
     fn ensure_target(&mut self) -> Option<()> {
-        let mut rc = RECT::default();
-        // SAFETY: valid window and out-pointer.
-        unsafe { GetClientRect(self.hwnd, &mut rc).ok()? };
-        let size = D2D_SIZE_U {
-            width: (rc.right - rc.left).max(1) as u32,
-            height: (rc.bottom - rc.top).max(1) as u32,
-        };
-        if let Some(t) = &self.target {
-            // SAFETY: valid render target.
-            unsafe {
-                if t.rt.GetPixelSize() != size {
-                    t.rt.Resize(&size).ok()?;
-                }
-            }
-            return Some(());
-        }
-        let props = D2D1_RENDER_TARGET_PROPERTIES {
-            r#type: D2D1_RENDER_TARGET_TYPE_DEFAULT,
-            pixelFormat: D2D1_PIXEL_FORMAT {
-                format: DXGI_FORMAT_UNKNOWN,
-                alphaMode: if self.mica {
-                    D2D1_ALPHA_MODE_PREMULTIPLIED
-                } else {
-                    D2D1_ALPHA_MODE_IGNORE
-                },
-            },
-            dpiX: 96.0,
-            dpiY: 96.0,
-            usage: D2D1_RENDER_TARGET_USAGE_NONE,
-            minLevel: D2D1_FEATURE_LEVEL_DEFAULT,
-        };
-        let hwnd_props = D2D1_HWND_RENDER_TARGET_PROPERTIES {
-            hwnd: self.hwnd,
-            pixelSize: size,
-            presentOptions: D2D1_PRESENT_OPTIONS_NONE,
-        };
-        // SAFETY: valid factory and property structs.
-        unsafe {
-            let rt = self.d2d.CreateHwndRenderTarget(&props, &hwnd_props).ok()?;
-            let brush = rt
-                .CreateSolidColorBrush(&color_f(Rgb::WHITE, 1.0), None)
-                .ok()?;
-            self.target = Some(Target { rt, brush });
-        }
-        Some(())
+        sync_target(&mut self.target, &self.d2d, self.hwnd, self.mica)
     }
 
     fn paint(&mut self) {
@@ -1636,13 +1758,13 @@ impl State {
             Node::Field { rect, mon, kind } => {
                 cv.fill(*rect, RADIUS * s, pal.field, 1.0);
                 cv.frame(*rect, RADIUS * s, pal.text, 0.18);
-                let focused = self.snap.monitors.get(*mon).is_some_and(|m| {
-                    self.edits
-                        .iter()
-                        // SAFETY: plain focus query.
-                        .any(|e| {
-                            e.mon == m.id && e.kind == *kind && e.hwnd == unsafe { GetFocus() }
-                        })
+                // SAFETY: plain focus query.
+                let focus = unsafe { GetFocus() };
+                let focused = self.edits.iter().any(|e| {
+                    e.hwnd == focus
+                        && e.kind == *kind
+                        && (e.mon.is_empty()
+                            || self.snap.monitors.get(*mon).is_some_and(|m| m.id == e.mon))
                 });
                 if focused {
                     let line =
@@ -1651,6 +1773,8 @@ impl State {
                 }
             }
             Node::Value(text, r) => cv.text(text, &fonts.value, *r, pal.text, 0.85),
+            #[cfg(feature = "plus")]
+            Node::Note(text, r) => cv.text(text, &fonts.note, *r, pal.text, 0.65),
             Node::Ctl(ctl, r) => self.draw_ctl(cv, *ctl, *r),
         }
     }
@@ -1663,15 +1787,7 @@ impl State {
             Ctl::Toggle(t) => cv.switch(r, self.toggle_on(t), accent),
             Ctl::Choice(c, k) => {
                 let label = self.choice_label(c, k);
-                if self.choice_selected(c, k) {
-                    cv.fill(r.inset(2.0 * s), (RADIUS - 1.0) * s, accent, 1.0);
-                    cv.text(&label, &fonts.mid, r, text_on(accent), 1.0);
-                } else {
-                    if hot {
-                        cv.fill(r.inset(2.0 * s), (RADIUS - 1.0) * s, pal.text, 0.08);
-                    }
-                    cv.text(&label, &fonts.mid, r, pal.text, 1.0);
-                }
+                self.draw_segment(cv, r, &label, self.choice_selected(c, k), hot);
             }
             Ctl::Slider(slide) => {
                 let (color, two) = match slide {
@@ -1722,9 +1838,7 @@ impl State {
                 } else {
                     Key::BtnOpenConfig
                 };
-                cv.fill(r, RADIUS * s, pal.text, if hot { 0.12 } else { 0.06 });
-                cv.frame(r, RADIUS * s, pal.text, 0.12);
-                cv.text(tr(self.lang(), key), &fonts.mid, r, pal.text, 1.0);
+                self.draw_button(cv, r, tr(self.lang(), key), hot);
             }
             Ctl::Swatch(i, k) => {
                 let current = self.snap.monitors[i].color == PALETTE[k];
@@ -1735,7 +1849,30 @@ impl State {
                     cv.ring(r.cx(), r.cy(), (SWATCH_R + 3.0) * s, 1.0 * s, pal.text, 0.5);
                 }
             }
+            #[cfg(feature = "plus")]
+            Ctl::Auto(c) => self.draw_auto(cv, c, r, hot),
         }
+    }
+
+    /// One option of a segmented choice.
+    fn draw_segment(&self, cv: &Canvas, r: Rect, label: &str, selected: bool, hot: bool) {
+        let (pal, s, accent) = (cv.pal, cv.s, self.theme.accent);
+        if selected {
+            cv.fill(r.inset(2.0 * s), (RADIUS - 1.0) * s, accent, 1.0);
+            cv.text(label, &cv.fonts.mid, r, text_on(accent), 1.0);
+        } else {
+            if hot {
+                cv.fill(r.inset(2.0 * s), (RADIUS - 1.0) * s, pal.text, 0.08);
+            }
+            cv.text(label, &cv.fonts.mid, r, pal.text, 1.0);
+        }
+    }
+
+    fn draw_button(&self, cv: &Canvas, r: Rect, label: &str, hot: bool) {
+        let (pal, s) = (cv.pal, cv.s);
+        cv.fill(r, RADIUS * s, pal.text, if hot { 0.12 } else { 0.06 });
+        cv.frame(r, RADIUS * s, pal.text, 0.12);
+        cv.text(label, &cv.fonts.mid, r, pal.text, 1.0);
     }
 }
 
@@ -1876,6 +2013,8 @@ fn create(snap: Snapshot) -> Option<HWND> {
                 drag: None,
                 tracking_leave: false,
                 picker: None,
+                #[cfg(feature = "plus")]
+                auto: automation::AutoUi::default(),
             })
         })();
         let Some(state) = state else {
@@ -2032,6 +2171,11 @@ unsafe extern "system" fn wnd_proc(
                 }
                 _ => {}
             }
+        }
+        #[cfg(feature = "plus")]
+        WM_SEARCH_DONE => {
+            with_state(State::search_done);
+            invalidate(hwnd);
         }
         WM_REVERT => {
             let edit = HWND(lparam.0 as *mut c_void);
