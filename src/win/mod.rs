@@ -15,8 +15,103 @@ pub mod tray;
 pub mod util;
 pub mod wheel;
 
+use crate::cli::{self, Command};
+use crate::config;
+use instance::Instance;
+use std::path::PathBuf;
+use std::time::Duration;
+use windows::Win32::Foundation::HWND;
+use windows::Win32::UI::WindowsAndMessaging::FindWindowW;
+use windows::core::PCWSTR;
+
 /// Process entry point: parse CLI, attach the parent console for output,
 /// forward to a running instance or run standalone `list`/`get`, otherwise run the app.
 pub fn main() -> i32 {
-    todo!()
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if !args.is_empty() {
+        util::attach_parent_console();
+    }
+    if args
+        .iter()
+        .any(|a| matches!(a.as_str(), "-h" | "--help" | "/?"))
+    {
+        print!("{}", cli::USAGE);
+        return 0;
+    }
+    let inv = match cli::parse(&args) {
+        Ok(inv) => inv,
+        Err(e) => {
+            eprintln!("{e}\n{}", cli::USAGE);
+            return 2;
+        }
+    };
+
+    let config_path = config::resolve_path(
+        inv.config_path.as_deref(),
+        &util::exe_dir(),
+        util::appdata_dir().as_deref(),
+    );
+    util::install_panic_hook(config_path.with_file_name("Nitor.log"));
+
+    match instance::acquire() {
+        Instance::Secondary(hwnd) => forward_to_primary(hwnd, &args),
+        // The guard keeps the single-instance mutex until the process exits.
+        Instance::Primary(_guard) => run_primary(config_path, inv.commands),
+    }
+}
+
+/// A second launch: hand the command line to the running instance and relay its answer.
+fn forward_to_primary(mut hwnd: HWND, args: &[String]) -> i32 {
+    if hwnd.0.is_null() {
+        hwnd = wait_for_primary_window();
+    }
+    if args.is_empty() {
+        return 0;
+    }
+    if hwnd.0.is_null() {
+        eprintln!("Nitor is running but did not answer.");
+        return 1;
+    }
+    match instance::forward(hwnd, args) {
+        Some((code, text)) => {
+            if !text.is_empty() {
+                println!("{text}");
+            }
+            code
+        }
+        None => {
+            eprintln!("Could not send the command to the running Nitor.");
+            1
+        }
+    }
+}
+
+/// The primary may still be starting up: look for its window for up to 2 s.
+fn wait_for_primary_window() -> HWND {
+    let class = util::wide(instance::WINDOW_CLASS);
+    for _ in 0..20 {
+        // SAFETY: `class` is a NUL-terminated wide string that outlives the call.
+        if let Ok(hwnd) = unsafe { FindWindowW(PCWSTR(class.as_ptr()), PCWSTR::null()) } {
+            return hwnd;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    HWND::default()
+}
+
+/// No other instance runs (we hold the mutex): decide between standalone and the tray app.
+fn run_primary(config_path: PathBuf, commands: Vec<Command>) -> i32 {
+    let is_query = |c: &Command| matches!(c, Command::List | Command::Get(_));
+    if !commands.is_empty() && commands.iter().all(is_query) {
+        return app::standalone(&config_path, &commands);
+    }
+    // `quit` with nothing running does nothing.
+    if !commands.is_empty() && commands.iter().all(|c| matches!(c, Command::Quit)) {
+        return 0;
+    }
+    let initial = commands
+        .into_iter()
+        .filter(|c| !matches!(c, Command::Quit | Command::Rescan))
+        .collect();
+    app::run(config_path, initial)
 }
