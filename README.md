@@ -72,7 +72,7 @@ For power users everything is also in `Nitor.ini`, next to the exe when that fol
 
 ## Updates
 
-Nitor checks GitHub Releases for a newer version at startup and then at most once a day, and tells you with a tray notification. It never installs anything on its own: choose **Update to x.y.z** in the tray menu to download the new exe, verify its SHA-256 checksum, replace itself and restart. **Check for updates** in the menu checks on demand. The only data sent is a `Nitor/<version>` user agent; nothing else leaves your PC. To turn the automatic check off, untick **Check for updates automatically** in Settings (`check_updates = false` in `Nitor.ini`). If Nitor's folder isn't writable, the menu item opens the release page instead.
+Nitor checks GitHub Releases for a newer version at every start and then at most once a day, and tells you with a tray notification (which Windows may hold back during quiet time or Focus). **Check for updates** shows the result in Settings (General: "Up to date", "vX available" with an **Install** button, or the error); without Settings open it uses a notification. Every check is logged in `Nitor.log`. It never installs anything on its own: choose **Update to x.y.z** in the tray menu to download the new exe, verify its SHA-256 checksum, replace itself and restart. The only data sent is a `Nitor/<version>` user agent; nothing else leaves your PC. To turn the automatic check off, untick **Check for updates automatically** in Settings (`check_updates = false` in `Nitor.ini`). If Nitor's folder isn't writable, the menu item opens the release page instead.
 
 ## Monitors that don't respond
 

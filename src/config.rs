@@ -514,22 +514,29 @@ impl MonitorSettings {
     }
 }
 
-/// Resolve the config path: explicit CLI path; else `Nitor.ini` in `exe_dir` if that
-/// directory is writable (probe by creating and deleting a temp file); else
-/// `<appdata>/Nitor/Nitor.ini`; else `exe_dir/Nitor.ini`.
+/// Resolve the config path: explicit CLI path; else an existing `Nitor.ini` in `exe_dir`;
+/// else an existing `<appdata>/Nitor/Nitor.ini` (so one failed writability probe cannot
+/// split the config); else `Nitor.ini` in `exe_dir` if that directory is writable (probe
+/// by creating and deleting a temp file); else `<appdata>/Nitor/Nitor.ini`; else
+/// `exe_dir/Nitor.ini`.
 pub fn resolve_path(cli: Option<&Path>, exe_dir: &Path, appdata: Option<&Path>) -> PathBuf {
     if let Some(p) = cli {
         return p.to_path_buf();
     }
+    let in_exe = exe_dir.join("Nitor.ini");
+    let in_appdata = appdata.map(|a| a.join("Nitor").join("Nitor.ini"));
+    if in_exe.is_file() {
+        return in_exe;
+    }
+    if let Some(p) = in_appdata.as_ref().filter(|p| p.is_file()) {
+        return p.clone();
+    }
     let probe = exe_dir.join(format!(".nitor_probe_{}", std::process::id()));
     if std::fs::write(&probe, b"").is_ok() {
         let _ = std::fs::remove_file(&probe);
-        return exe_dir.join("Nitor.ini");
+        return in_exe;
     }
-    match appdata {
-        Some(a) => a.join("Nitor").join("Nitor.ini"),
-        None => exe_dir.join("Nitor.ini"),
-    }
+    in_appdata.unwrap_or(in_exe)
 }
 
 #[cfg(test)]
@@ -706,6 +713,22 @@ mod tests {
             resolve_path(None, &missing, None),
             missing.join("Nitor.ini")
         );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn resolve_prefers_existing_file() {
+        let d = tmp_dir("resolve_existing");
+        let (exe, ad) = (d.join("exe"), d.join("appdata"));
+        std::fs::create_dir_all(&exe).unwrap();
+        std::fs::create_dir_all(ad.join("Nitor")).unwrap();
+        let in_ad = ad.join("Nitor").join("Nitor.ini");
+        // Only in appdata: wins although the exe folder is writable.
+        std::fs::write(&in_ad, "").unwrap();
+        assert_eq!(resolve_path(None, &exe, Some(&ad)), in_ad);
+        // Both exist: the exe folder wins.
+        std::fs::write(exe.join("Nitor.ini"), "").unwrap();
+        assert_eq!(resolve_path(None, &exe, Some(&ad)), exe.join("Nitor.ini"));
         let _ = std::fs::remove_dir_all(&d);
     }
 }
