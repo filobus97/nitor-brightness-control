@@ -446,7 +446,9 @@ impl Auto {
                     .clamp(1000, 6500)
             }
             "experimental_warm" => self.experimental_warm = parse_bool(v, d.experimental_warm),
-            "manual_kelvin" => self.manual_kelvin = parse_num::<u16>(v).map(|k| k.clamp(1000, 6500)),
+            "manual_kelvin" => {
+                self.manual_kelvin = parse_num::<u16>(v).map(|k| k.clamp(1000, 6500))
+            }
             "override_mode" => {
                 self.override_mode = match v.to_ascii_lowercase().as_str() {
                     "minutes" => OverrideMode::Minutes,
@@ -675,7 +677,12 @@ mod tests {
         assert_eq!(a.day_brightness, 80);
         assert_eq!((a.day_kelvin, a.night_kelvin), (1000, 6500));
         assert_eq!(a.manual_kelvin, Some(1000));
-        assert_eq!(Config::parse("[auto]\nmanual_kelvin = x\n").auto.manual_kelvin, None);
+        assert_eq!(
+            Config::parse("[auto]\nmanual_kelvin = x\n")
+                .auto
+                .manual_kelvin,
+            None
+        );
         assert_eq!(a.override_mode, OverrideMode::Minutes);
         assert_eq!(a.override_minutes, 1);
         assert_eq!(

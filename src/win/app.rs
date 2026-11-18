@@ -493,7 +493,11 @@ impl App {
             }
             Some(StaleFix::Switched) => balloons.push((
                 app_name(),
-                tr_with(lang, Key::AutostartSwitched, &update::product_title("Nitor")),
+                tr_with(
+                    lang,
+                    Key::AutostartSwitched,
+                    &update::product_title("Nitor"),
+                ),
             )),
             None => {}
         }
@@ -1234,7 +1238,11 @@ impl App {
     /// Push changed values/colors to an open flyout.
     fn update_flyout(&self) {
         if flyout::is_visible() {
-            flyout::update(self.flyout_rows());
+            flyout::update(
+                self.flyout_rows(),
+                #[cfg(feature = "plus")]
+                self.flyout_color(),
+            );
         }
     }
 
@@ -1247,7 +1255,14 @@ impl App {
                 self.read_all();
             }
             let linked = self.config.general.linked;
-            flyout::show(anchor, self.flyout_rows(), linked, self.lang);
+            flyout::show(
+                anchor,
+                self.flyout_rows(),
+                linked,
+                self.lang,
+                #[cfg(feature = "plus")]
+                self.flyout_color(),
+            );
         }
     }
 
@@ -1308,6 +1323,10 @@ impl App {
                     self.apply_master(i, flyout::master());
                 }
             }
+            #[cfg(feature = "plus")]
+            Action::PreviewKelvin(k) => self.color.preview(&color_views(&self.monitors), k),
+            #[cfg(feature = "plus")]
+            Action::SetKelvin(k) => self.set_manual_kelvin(k),
             Action::Rescan => self.rescan(),
             Action::Settings => self.open_settings(),
         }
@@ -1669,6 +1688,28 @@ impl App {
             &color_views(&self.monitors),
             self.auto.pause_until(),
         );
+    }
+
+    /// The color temperature the flyout's slider starts at; `None` hides it, as no display
+    /// could take a color change (all in HDR).
+    fn flyout_color(&self) -> Option<u32> {
+        self.monitors
+            .iter()
+            .any(|m| m.row.active && !m.row.hdr)
+            .then(|| self.color.current())
+    }
+
+    /// The user chose a temperature in the flyout. While color is automatic it holds the
+    /// plan off like a manual brightness change; otherwise it is the fixed temperature
+    /// (neutral at 6500 K), kept in the config.
+    fn set_manual_kelvin(&mut self, kelvin: u32) {
+        if self.config.auto.color_enabled {
+            self.color.hold(&self.config, kelvin);
+        } else {
+            self.config.auto.manual_kelvin = (kelvin < MAX_K).then_some(kelvin as u16);
+            self.save();
+        }
+        self.color_replan();
     }
 
     /// A change from the Settings window; `on_settings` saves and replans afterwards.

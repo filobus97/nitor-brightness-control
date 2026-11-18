@@ -2,7 +2,7 @@
 //! place search. A child module of `settings`, so it builds on that file's private pieces.
 
 use super::*;
-use crate::auto::geocode::{self, Place};
+use crate::auto::geocode::Place;
 use crate::auto::map::round2;
 use crate::win::geo;
 

@@ -382,6 +382,7 @@ mod tests {
     fn templates_keep_placeholder() {
         let templates = [
             Key::HotkeyConflict,
+            Key::AutostartSwitched,
             Key::MenuUpdateTo,
             Key::UpdateAvailable,
             Key::UpToDate,
