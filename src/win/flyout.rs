@@ -15,7 +15,7 @@ use super::icon::{color_f, has_family};
 use super::theme::Theme;
 use super::util;
 #[cfg(feature = "plus")]
-use crate::auto::color::{UI_STEPS, kelvin_step, step_kelvin, tint};
+use crate::auto::color::{MAX_K, kelvin_step, step_kelvin, tint, ui_steps};
 use crate::color::{PALETTE, Rgb};
 #[cfg(feature = "plus")]
 use crate::i18n::PlusKey;
@@ -74,6 +74,16 @@ pub struct FlyoutRow {
     pub link_max: u8,
 }
 
+/// Plus: the color temperature slider as the flyout shows it.
+#[cfg(feature = "plus")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ColorRow {
+    /// What the displays show now (kelvin).
+    pub kelvin: u32,
+    /// The warm end of the slider (kelvin).
+    pub min_k: u32,
+}
+
 /// What the user asked for; delivered through the function given to [`init`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
@@ -123,13 +133,13 @@ fn class_name() -> Vec<u16> {
 }
 
 /// Open the flyout near `anchor` (screen coordinates of the clicked tray icon).
-/// `color` (Plus): the temperature in kelvin the displays show; `None` hides the slider.
+/// `color` (Plus): the color temperature slider; `None` hides it.
 pub fn show(
     anchor: POINT,
     rows: Vec<FlyoutRow>,
     linked: bool,
     lang: Lang,
-    #[cfg(feature = "plus")] color: Option<u32>,
+    #[cfg(feature = "plus")] color: Option<ColorRow>,
 ) {
     // A click on the tray icon first deactivates (closes) the flyout, then arrives here: ignore it.
     if is_visible() || CLOSED_AT.get().is_some_and(|t| t.elapsed() < REOPEN_GUARD) {
@@ -158,7 +168,7 @@ pub fn show(
 }
 
 /// New values/colors while open. Does not disturb a drag in progress.
-pub fn update(rows: Vec<FlyoutRow>, #[cfg(feature = "plus")] color: Option<u32>) {
+pub fn update(rows: Vec<FlyoutRow>, #[cfg(feature = "plus")] color: Option<ColorRow>) {
     let changed = with_state(|st| {
         st.merge(
             rows,
@@ -322,7 +332,7 @@ struct Layout {
 enum Slider {
     Master,
     Row(usize),
-    /// Plus: color temperature, in steps of [`UI_STEPS`].
+    /// Plus: color temperature, in steps of 50 K.
     #[cfg(feature = "plus")]
     Color,
 }
@@ -495,6 +505,9 @@ struct State {
     /// Plus: color temperature slider position (`None`: no slider).
     #[cfg(feature = "plus")]
     color: Option<u8>,
+    /// Plus: the warm end of the color slider (kelvin).
+    #[cfg(feature = "plus")]
+    color_min: u32,
     /// Plus: the color slider moved during the current drag (a final value is due).
     #[cfg(feature = "plus")]
     color_moved: bool,
@@ -625,7 +638,7 @@ impl State {
         let color = self.color.map(|_| {
             let caption = Rect::new(PAD * s, y, width - PAD * s, y + CAPTION_H * s);
             let slider = SliderGeom {
-                max: UI_STEPS,
+                max: ui_steps(self.color_min),
                 ..slider_at(y + CAPTION_H * s)
             };
             y += (CAPTION_H + COLOR_H) * s;
@@ -708,7 +721,7 @@ impl State {
         rows: Vec<FlyoutRow>,
         linked: bool,
         lang: Lang,
-        #[cfg(feature = "plus")] color: Option<u32>,
+        #[cfg(feature = "plus")] color: Option<ColorRow>,
     ) {
         self.rows = rows;
         self.linked = linked;
@@ -720,7 +733,7 @@ impl State {
         self.master_touched = false;
         #[cfg(feature = "plus")]
         {
-            self.color = color.map(kelvin_step);
+            self.set_color(color);
             self.color_moved = false;
         }
         self.recompute_master();
@@ -765,20 +778,29 @@ impl State {
         }
     }
 
+    /// Take the color slider's position and range.
+    #[cfg(feature = "plus")]
+    fn set_color(&mut self, color: Option<ColorRow>) {
+        if let Some(c) = color {
+            self.color_min = c.min_k;
+        }
+        self.color = color.map(|c| kelvin_step(c.kelvin, c.min_k));
+    }
+
     /// Take new rows; returns whether anything visible changed. Values and link ranges of
     /// the control being dragged are kept, the user's hand wins over a late read.
     fn merge(
         &mut self,
         mut rows: Vec<FlyoutRow>,
-        #[cfg(feature = "plus")] color: Option<u32>,
+        #[cfg(feature = "plus")] color: Option<ColorRow>,
     ) -> bool {
         #[cfg(feature = "plus")]
         let color_changed = {
-            let new = color.map(kelvin_step);
-            let dragged = self.drag == Some(Drag::Slider(Slider::Color));
-            (new != self.color && !dragged)
-                .then(|| self.color = new)
-                .is_some()
+            let before = (self.color, self.color_min);
+            if self.drag != Some(Drag::Slider(Slider::Color)) {
+                self.set_color(color);
+            }
+            before != (self.color, self.color_min)
         };
         #[cfg(not(feature = "plus"))]
         let color_changed = false;
@@ -845,7 +867,7 @@ impl State {
     fn max_of(&self, id: Slider) -> u8 {
         match id {
             #[cfg(feature = "plus")]
-            Slider::Color => UI_STEPS,
+            Slider::Color => ui_steps(self.color_min),
             _ => 100,
         }
     }
@@ -870,7 +892,7 @@ impl State {
             #[cfg(feature = "plus")]
             Slider::Color => {
                 self.color = Some(v);
-                let kelvin = step_kelvin(v);
+                let kelvin = step_kelvin(v, self.color_min);
                 // While dragging only a preview goes out; the release sends the value.
                 if self.drag == Some(Drag::Slider(Slider::Color)) {
                     self.color_moved = true;
@@ -903,7 +925,9 @@ impl State {
         self.drag = None;
         #[cfg(feature = "plus")]
         if std::mem::take(&mut self.color_moved) {
-            return self.color.map(|s| Action::SetKelvin(step_kelvin(s)));
+            return self
+                .color
+                .map(|s| Action::SetKelvin(step_kelvin(s, self.color_min)));
         }
         None
     }
@@ -1187,7 +1211,7 @@ impl Canvas<'_> {
     }
 
     /// Sun, amber-to-white gradient track, thumb in the shown color, value, focus ring.
-    fn color_slider(&self, g: &SliderGeom, step: u8, look: (bool, bool, bool)) {
+    fn color_slider(&self, g: &SliderGeom, step: u8, min_k: u32, look: (bool, bool, bool)) {
         let (hot, pressed, focused) = look;
         let (c, s) = (self.colors, self.s);
         self.sun(g.glyph);
@@ -1200,7 +1224,7 @@ impl Canvas<'_> {
             g.cy + TRACK_H * s / 2.0,
         );
         let stops: [D2D1_GRADIENT_STOP; 5] = std::array::from_fn(|i| {
-            let [r, gr, b] = tint(step_kelvin(UI_STEPS / 4 * i as u8));
+            let [r, gr, b] = tint(min_k + (MAX_K - min_k) * i as u32 / 4);
             D2D1_GRADIENT_STOP {
                 position: i as f32 / 4.0,
                 color: color_f(Rgb::new(r, gr, b), 1.0),
@@ -1232,7 +1256,8 @@ impl Canvas<'_> {
         };
 
         let tx = g.x_of(step);
-        let [r, gr, b] = tint(step_kelvin(step));
+        let kelvin = step_kelvin(step, min_k);
+        let [r, gr, b] = tint(kelvin);
         self.circle(tx, g.cy, THUMB_R * s, Rgb::BLACK, 0.25);
         self.circle(tx, g.cy, (THUMB_R - 0.5) * s, c.thumb, 1.0);
         let dot = match (pressed, hot) {
@@ -1245,7 +1270,7 @@ impl Canvas<'_> {
         if focused {
             self.ring(tx, g.cy, (THUMB_R + 3.0) * s, 2.0 * s, c.text, 1.0);
         }
-        let label = format!("{} K", step_kelvin(step));
+        let label = format!("{kelvin} K");
         self.text(&label, &self.fonts.hint, g.value, c.text, 1.0);
     }
 }
@@ -1425,7 +1450,7 @@ impl State {
                 0.75,
             );
             let look = (hot(id), pressed(id), focused(id));
-            cv.color_slider(g, step, look);
+            cv.color_slider(g, step, self.color_min, look);
         }
 
         // Footer: "Link all" switch + label, then the hovered button's label and the buttons.
@@ -1593,6 +1618,8 @@ impl State {
                 master_touched: false,
                 #[cfg(feature = "plus")]
                 color: None,
+                #[cfg(feature = "plus")]
+                color_min: MAX_K,
                 #[cfg(feature = "plus")]
                 color_moved: false,
                 picker: None,

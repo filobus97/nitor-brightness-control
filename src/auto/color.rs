@@ -13,10 +13,12 @@ pub const WARM_LIMIT_K: u32 = 4000;
 
 /// Warmest value the colour sliders offer (below [`WARM_LIMIT_K`] only when experimental).
 pub const UI_MIN_K: u32 = 2700;
-/// The flyout slider moves in steps of this many kelvin, from [`UI_MIN_K`] to [`MAX_K`].
+/// The flyout slider moves in steps of this many kelvin, from its warmest end to [`MAX_K`].
 pub const UI_STEP_K: u32 = 50;
-/// Number of steps of the flyout slider (its positions are `0..=UI_STEPS`).
-pub const UI_STEPS: u8 = ((MAX_K - UI_MIN_K) / UI_STEP_K) as u8;
+/// Number of steps of a flyout slider whose warm end is `min_k` (positions are `0..=steps`).
+pub fn ui_steps(min_k: u32) -> u8 {
+    (MAX_K.saturating_sub(min_k) / UI_STEP_K) as u8
+}
 /// Smallest kelvin change worth applying; the planner wakes only for steps this big.
 pub const MIN_DELTA_K: f32 = 100.0;
 /// A DDC monitor's gains are written at most this often (seconds): they live in its EEPROM.
@@ -27,15 +29,15 @@ pub fn needs_experimental_warm(kelvin: u32) -> bool {
     kelvin < WARM_LIMIT_K
 }
 
-/// Flyout slider position (nearest step) of a temperature.
-pub fn kelvin_step(kelvin: u32) -> u8 {
-    let k = kelvin.clamp(UI_MIN_K, MAX_K) - UI_MIN_K;
+/// Flyout slider position (nearest step) of a temperature, for a slider warm end `min_k`.
+pub fn kelvin_step(kelvin: u32, min_k: u32) -> u8 {
+    let k = kelvin.clamp(min_k, MAX_K) - min_k;
     ((k + UI_STEP_K / 2) / UI_STEP_K) as u8
 }
 
 /// Temperature of a flyout slider position.
-pub fn step_kelvin(step: u8) -> u32 {
-    UI_MIN_K + u32::from(step.min(UI_STEPS)) * UI_STEP_K
+pub fn step_kelvin(step: u8, min_k: u32) -> u32 {
+    min_k + u32::from(step.min(ui_steps(min_k))) * UI_STEP_K
 }
 
 /// What a white pixel looks like at `kelvin`, for drawing (`[r, g, b]`).
@@ -68,6 +70,11 @@ pub fn gamma_kelvin(kelvin: u32, extended: bool) -> u32 {
 pub fn gain_target(original: u32, max: u32, multiplier: f32) -> u32 {
     let v = (original as f32 * multiplier.clamp(0.0, 1.0)).round() as u32;
     v.min(max.max(original))
+}
+
+/// Whether the gains read back are what was written (a monitor may round by one).
+pub fn gains_match(read: [u32; 3], written: [u32; 3]) -> bool {
+    read.iter().zip(written).all(|(&r, w)| r.abs_diff(w) <= 1)
 }
 
 /// Day/night colour curve (kelvin) of the configuration.
@@ -144,16 +151,19 @@ mod tests {
 
     #[test]
     fn slider_steps() {
-        assert_eq!((kelvin_step(UI_MIN_K), kelvin_step(MAX_K)), (0, UI_STEPS));
-        assert_eq!(UI_STEPS, 76);
-        assert_eq!(kelvin_step(100), 0);
-        assert_eq!(kelvin_step(9000), UI_STEPS);
-        assert_eq!(kelvin_step(4537), 37);
-        assert_eq!(step_kelvin(37), 4550);
-        assert_eq!(step_kelvin(200), MAX_K);
-        for s in 0..=UI_STEPS {
-            assert_eq!(kelvin_step(step_kelvin(s)), s);
+        for min in [UI_MIN_K, WARM_LIMIT_K] {
+            let n = ui_steps(min);
+            assert_eq!((kelvin_step(min, min), kelvin_step(MAX_K, min)), (0, n));
+            assert_eq!(kelvin_step(100, min), 0);
+            assert_eq!(kelvin_step(9000, min), n);
+            assert_eq!(step_kelvin(200, min), MAX_K);
+            for s in 0..=n {
+                assert_eq!(kelvin_step(step_kelvin(s, min), min), s);
+            }
         }
+        assert_eq!((ui_steps(UI_MIN_K), ui_steps(WARM_LIMIT_K)), (76, 50));
+        assert_eq!(kelvin_step(4537, UI_MIN_K), 37);
+        assert_eq!(step_kelvin(37, UI_MIN_K), 4550);
         assert_eq!(tint(MAX_K), [255, 255, 255]);
         assert!(tint(UI_MIN_K)[2] < tint(UI_MIN_K)[1]);
     }
@@ -193,6 +203,13 @@ mod tests {
         assert_eq!(gamma_kelvin(2700, false), 4000);
         assert_eq!(gamma_kelvin(5000, false), 5000);
         assert_eq!(gamma_kelvin(2700, true), 2700);
+    }
+
+    #[test]
+    fn read_back_tolerates_one() {
+        assert!(gains_match([50, 40, 30], [50, 41, 29]));
+        assert!(!gains_match([50, 40, 30], [50, 42, 30]));
+        assert!(!gains_match([100, 100, 100], [100, 100, 77]));
     }
 
     #[test]

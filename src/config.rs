@@ -77,6 +77,8 @@ pub struct MonitorSettings {
     pub badge: Option<char>,
     /// Hidden from the tray.
     pub hidden: bool,
+    /// Plus: how its color temperature is set.
+    pub color_method: ColorMethodPref,
 }
 
 impl Default for MonitorSettings {
@@ -92,6 +94,7 @@ impl Default for MonitorSettings {
             link_max: 100,
             badge: None,
             hidden: false,
+            color_method: ColorMethodPref::Auto,
         }
     }
 }
@@ -110,6 +113,28 @@ pub enum OverrideMode {
     #[default]
     UntilTransition,
     Minutes,
+}
+
+/// How a monitor gets its color temperature (Nitor Plus; `[monitor.<id>] color_method`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ColorMethodPref {
+    /// Software: a gamma ramp, which always works and never touches the monitor's memory.
+    #[default]
+    Auto,
+    /// RGB gains over DDC/CI, if the monitor really applies them.
+    Ddc,
+    /// Software, chosen explicitly.
+    Gamma,
+}
+
+impl ColorMethodPref {
+    fn parse(v: &str) -> ColorMethodPref {
+        match v.trim().to_ascii_lowercase().as_str() {
+            "ddc" | "hardware" => ColorMethodPref::Ddc,
+            "gamma" | "software" => ColorMethodPref::Gamma,
+            _ => ColorMethodPref::Auto,
+        }
+    }
 }
 
 /// `[auto]` section: Nitor Plus automation. Parsed always, only acted on in Plus builds.
@@ -325,6 +350,13 @@ impl Config {
             if m.hidden {
                 o += "hidden = true\n";
             }
+            match m.color_method {
+                ColorMethodPref::Auto => {}
+                ColorMethodPref::Ddc => o += "color_method = ddc          ; auto | ddc | gamma\n",
+                ColorMethodPref::Gamma => {
+                    o += "color_method = gamma          ; auto | ddc | gamma\n"
+                }
+            }
         }
         o += "\n[hotkeys]\n";
         for (k, v) in &self.hotkeys {
@@ -512,6 +544,7 @@ impl MonitorSettings {
             "link_max" => self.link_max = parse_num::<u8>(v).unwrap_or(100).min(100),
             "badge" => self.badge = v.chars().next(),
             "hidden" => self.hidden = parse_bool(v, false),
+            "color_method" => self.color_method = ColorMethodPref::parse(v),
             _ => return,
         }
         if self.min > self.max {
@@ -602,6 +635,7 @@ mod tests {
                 link_max: 80,
                 badge: Some('D'),
                 hidden: true,
+                color_method: ColorMethodPref::Ddc,
             },
         );
         c.monitors
@@ -700,6 +734,18 @@ mod tests {
         assert_eq!(c.general.tray_style, TrayStyle::Text);
         assert_eq!(c.monitors["M"].color, None);
         assert_eq!(c.monitors["M"].max, 100);
+        assert_eq!(c.monitors["M"].color_method, ColorMethodPref::Auto);
+        for (text, want) in [
+            ("DDC", ColorMethodPref::Ddc),
+            ("hardware", ColorMethodPref::Ddc),
+            (" Gamma ", ColorMethodPref::Gamma),
+            ("software", ColorMethodPref::Gamma),
+            ("auto", ColorMethodPref::Auto),
+            ("???", ColorMethodPref::Auto),
+        ] {
+            let c = Config::parse(&format!("[monitor.M]\ncolor_method = {text}\n"));
+            assert_eq!(c.monitors["M"].color_method, want, "{text}");
+        }
     }
 
     #[test]

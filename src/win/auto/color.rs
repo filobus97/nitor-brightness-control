@@ -1,9 +1,10 @@
 //! Colour temperature (Nitor Plus): per-display method choice and application.
 //!
-//! Hardware first: a DDC/CI monitor whose red/green/blue video gains (VCP 0x16/0x18/0x1A)
-//! answer gets them scaled by its DDC worker (see `ddc::ColorRequest`: probing, EEPROM
-//! throttle and restore live there). Everything else, and every built-in panel, falls back
-//! to a gamma ramp on the display's DC. Displays in HDR are skipped.
+//! Software first: a gamma ramp on the display's DC always works and never writes to the
+//! monitor. Only a monitor whose `color_method` is `ddc` gets its red/green/blue video gains
+//! (VCP 0x16/0x18/0x1A) scaled by its DDC worker (see `ddc::ColorRequest`: probing, EEPROM
+//! throttle, read-back check and restore live there); one that does not really apply them is
+//! put back and falls back to gamma for the session. Displays in HDR are skipped.
 //!
 //! No polling: the planner (`crate::auto::plan`, same twilight curve as brightness) says
 //! when the temperature will have moved by 100 K; `TIMER_COLOR` sleeps until then.
@@ -15,10 +16,10 @@ use crate::auto::color::{
 };
 use crate::auto::drive::{location, override_until, timer_delay_ms};
 use crate::auto::plan::{PlanInput, plan};
-use crate::config::Config;
+use crate::config::{ColorMethodPref, Config};
 use crate::win::ddc::{ColorRequest, DdcWorker};
 use crate::win::util::{log, wide};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{CloseHandle, ERROR_SUCCESS, HWND, LPARAM, WPARAM};
@@ -50,6 +51,8 @@ pub struct ColorView<'a> {
     pub ddc: Option<&'a DdcWorker>,
     /// HDR / advanced colour is on.
     pub hdr: bool,
+    /// The user's choice of method for this monitor.
+    pub pref: ColorMethodPref,
 }
 
 /// Colour state of one display.
@@ -57,8 +60,8 @@ pub struct ColorView<'a> {
 struct Disp {
     /// Decided method; `None` while a DDC probe is out or before the first decision.
     method: Option<Method>,
-    /// The monitor's video gains did not work: use gamma.
-    ddc_failed: bool,
+    /// The method choice the display was last brought to its color under.
+    pref: Option<ColorMethodPref>,
     /// Kelvin last requested (hardware) or set (gamma, after the warm limit).
     shown: Option<u32>,
     /// A gamma ramp was set (an identity ramp is due on restore).
@@ -76,6 +79,8 @@ pub struct ColorEngine {
     /// `gamma_range_extended()` and the option, as of the last planning round.
     extended: bool,
     displays: HashMap<String, Disp>,
+    /// Monitors whose video gains did not work this session: they use gamma.
+    unsupported: HashSet<String>,
 }
 
 impl ColorEngine {
@@ -87,7 +92,13 @@ impl ColorEngine {
             current: MAX_K,
             extended: false,
             displays: HashMap::new(),
+            unsupported: HashSet::new(),
         }
+    }
+
+    /// Whether monitor `id`'s hardware color did not work this session.
+    pub fn unsupported(&self, id: &str) -> bool {
+        self.unsupported.contains(id)
     }
 
     /// The method decided for monitor `id` (`None` until decided).
@@ -177,8 +188,23 @@ impl ColorEngine {
     /// `live` (a drag in progress) only gamma ramps are written.
     fn apply(&mut self, v: &ColorView, kelvin: u32, live: bool) {
         let extended = self.extended;
+        let unsupported = self.unsupported.contains(v.id);
         let d = self.displays.entry(v.id.to_string()).or_default();
-        let ddc = v.ddc.filter(|_| !d.ddc_failed);
+        if d.pref.is_some_and(|p| p != v.pref) {
+            // The method changed: the old one's state goes back first.
+            if let Some(w) = v.ddc {
+                w.set_color(ColorRequest::Restore);
+            }
+            if std::mem::take(&mut d.ramp) {
+                set_ramp(v.device_name, MAX_K);
+            }
+            (d.method, d.shown) = (None, None);
+            log(&format!("color id={} method choice {:?}", v.id, v.pref));
+        }
+        d.pref = Some(v.pref);
+        let ddc = v
+            .ddc
+            .filter(|_| v.pref == ColorMethodPref::Ddc && !unsupported);
         if d.method.is_none() && ddc.is_none() {
             let m = if v.hdr { Method::Hdr } else { Method::Gamma };
             d.method = Some(m);
@@ -211,8 +237,12 @@ impl ColorEngine {
     }
 
     /// The worker of monitor `id` reported its gains: true if colors need planning again
-    /// (the monitor falls back to gamma).
+    /// (the monitor falls back to gamma). `available` is false when the gains are missing,
+    /// rejected, or were not what was written when read back.
     pub fn on_gains(&mut self, id: &str, available: bool) -> bool {
+        if !available {
+            self.unsupported.insert(id.to_string());
+        }
         let Some(d) = self.displays.get_mut(id) else {
             return false;
         };
@@ -221,7 +251,7 @@ impl ColorEngine {
             log(&format!("color id={id} method=Hardware"));
             false
         } else {
-            (d.method, d.ddc_failed, d.shown) = (None, true, None);
+            (d.method, d.shown) = (None, None);
             log(&format!("color id={id} DDC gains unavailable, using gamma"));
             true
         }
@@ -238,7 +268,7 @@ impl ColorEngine {
             if d.shown.take().is_none() && !d.ramp {
                 continue;
             }
-            if let Some(w) = v.ddc.filter(|_| !d.ddc_failed) {
+            if let Some(w) = v.ddc {
                 w.set_color(ColorRequest::Restore);
             }
             if std::mem::take(&mut d.ramp) {

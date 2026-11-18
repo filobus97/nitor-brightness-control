@@ -559,7 +559,8 @@ impl App {
         }
         // Monitors and displays go back to their own colors before the workers stop.
         #[cfg(feature = "plus")]
-        self.color.release(&color_views(&self.monitors));
+        self.color
+            .release(&color_views(&self.monitors, &self.config));
         self.monitors.clear();
         lock(&self.queue).clear();
         self.stop_wheel();
@@ -1324,7 +1325,9 @@ impl App {
                 }
             }
             #[cfg(feature = "plus")]
-            Action::PreviewKelvin(k) => self.color.preview(&color_views(&self.monitors), k),
+            Action::PreviewKelvin(k) => self
+                .color
+                .preview(&color_views(&self.monitors, &self.config), k),
             #[cfg(feature = "plus")]
             Action::SetKelvin(k) => self.set_manual_kelvin(k),
             Action::Rescan => self.rescan(),
@@ -1375,6 +1378,10 @@ impl App {
                     internal: m.row.internal,
                     #[cfg(feature = "plus")]
                     color_method: self.color.method(&m.row.id),
+                    #[cfg(feature = "plus")]
+                    color_unsupported: self.color.unsupported(&m.row.id),
+                    #[cfg(feature = "plus")]
+                    hdr: m.row.hdr,
                 }
             })
             .collect();
@@ -1469,6 +1476,8 @@ impl App {
         let entry = self.config.monitors.entry(id.to_string()).or_default();
         match edit {
             MonitorEdit::Color(color) => self.set_color(i, color),
+            #[cfg(feature = "plus")]
+            MonitorEdit::ColorMethod(method) => entry.color_method = method,
             MonitorEdit::Alias(alias) => {
                 entry.alias = alias.clone();
                 self.monitors[i].row.alias = alias;
@@ -1685,18 +1694,22 @@ impl App {
         }
         self.color.plan(
             &self.config,
-            &color_views(&self.monitors),
+            &color_views(&self.monitors, &self.config),
             self.auto.pause_until(),
         );
     }
 
-    /// The color temperature the flyout's slider starts at; `None` hides it, as no display
-    /// could take a color change (all in HDR).
-    fn flyout_color(&self) -> Option<u32> {
+    /// The flyout's color slider: it starts at the temperature the displays show, and its
+    /// warm end is the Settings floor. `None` hides it, as no display could take a color
+    /// change (all in HDR).
+    fn flyout_color(&self) -> Option<flyout::ColorRow> {
         self.monitors
             .iter()
             .any(|m| m.row.active && !m.row.hdr)
-            .then(|| self.color.current())
+            .then(|| flyout::ColorRow {
+                kelvin: self.color.current(),
+                min_k: color_floor(self.config.auto.experimental_warm),
+            })
     }
 
     /// The user chose a temperature in the flyout. While color is automatic it holds the
@@ -1778,7 +1791,7 @@ impl App {
 
 /// The colour engine's view of the monitors.
 #[cfg(feature = "plus")]
-fn color_views(monitors: &[Monitor]) -> Vec<auto::ColorView<'_>> {
+fn color_views<'a>(monitors: &'a [Monitor], config: &Config) -> Vec<auto::ColorView<'a>> {
     monitors
         .iter()
         .map(|m| auto::ColorView {
@@ -1787,6 +1800,11 @@ fn color_views(monitors: &[Monitor]) -> Vec<auto::ColorView<'_>> {
             // External monitors only: built-in panels (WMI) take the gamma path.
             ddc: m.worker.as_ref().filter(|_| !m.row.internal),
             hdr: m.row.hdr,
+            pref: config
+                .monitors
+                .get(&m.row.id)
+                .map(|s| s.color_method)
+                .unwrap_or_default(),
         })
         .collect()
 }

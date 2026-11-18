@@ -99,6 +99,12 @@ pub struct MonitorInfo {
     /// Plus: how its color temperature is set (`None` until decided or while off).
     #[cfg(feature = "plus")]
     pub color_method: Option<crate::auto::color::Method>,
+    /// Plus: its video gains did not work this session (it uses gamma).
+    #[cfg(feature = "plus")]
+    pub color_unsupported: bool,
+    /// Plus: HDR / advanced color is on (no color change possible).
+    #[cfg(feature = "plus")]
+    pub hdr: bool,
 }
 
 /// Where the update check stands, shown in the General card.
@@ -151,6 +157,9 @@ pub enum MonitorEdit {
     Shown(bool),
     /// Brightness limits `(min, max)`.
     Limits(u8, u8),
+    /// Plus: how its color temperature is set.
+    #[cfg(feature = "plus")]
+    ColorMethod(crate::config::ColorMethodPref),
     MoveUp,
     MoveDown,
 }
