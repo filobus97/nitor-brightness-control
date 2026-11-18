@@ -6,7 +6,7 @@ use super::monitors::PhysicalHandle;
 use super::util::log;
 use super::wmi::Wmi;
 #[cfg(feature = "plus")]
-use crate::auto::color::{DDC_MIN_INTERVAL_SECS, gain_target, rgb_multipliers};
+use crate::auto::color::{DDC_MIN_INTERVAL_SECS, gain_target, gains_match, rgb_multipliers};
 use crate::throttle::{WriteThrottle, percent_to_raw, raw_to_percent};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -481,6 +481,20 @@ fn run(key: u64, backend: Backend, shared: Shared, notify: Notify) {
                             break;
                         }
                         now_vals[i] = target;
+                    }
+                }
+                // Many monitors answer the gain reads but ignore the writes (outside their
+                // User/Custom color mode): read the gains back, they must be what was written.
+                if ok && kelvin.is_some() {
+                    std::thread::sleep(RETRY_DELAY);
+                    let back = panel.read_gains().map(|(cur, _)| cur);
+                    if !back.is_some_and(|b| gains_match(b, now_vals)) {
+                        log(&format!(
+                            "color ddc key={key} wrote {now_vals:?}, read back {back:?}: not applied"
+                        ));
+                        // What the monitor really holds, so the restore writes only what differs.
+                        now_vals = back.unwrap_or(now_vals);
+                        ok = false;
                     }
                 }
                 {

@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::auto::color::{MAX_K, Method, UI_MIN_K, WARM_LIMIT_K};
+use crate::config::ColorMethodPref;
 
 /// Temperature slider granularity (kelvin), the planner's own step.
 const STEP_K: u32 = 100;
@@ -18,6 +19,8 @@ pub(in crate::win::settings) enum ColorCtl {
     WarmRange,
     /// Open the Windows Night Light settings.
     NightLight,
+    /// Monitor `i`'s method choice.
+    Method(usize, ColorMethodPref),
 }
 
 fn ctl(c: ColorCtl) -> Ctl {
@@ -47,18 +50,70 @@ impl State {
                 self.note_row(b, self.pt(K::ColorNightLightNote));
                 self.color_button_row(b, ColorCtl::NightLight);
             }
-            for (i, m) in self.snap.monitors.iter().enumerate() {
-                let Some(method) = m.color_method else {
-                    continue;
-                };
+        }
+        for (i, m) in self.snap.monitors.iter().enumerate() {
+            if m.internal {
+                // A built-in panel has no hardware choice: software only.
                 let row = b.row(ROW_H);
                 let value = Rect::new(row.l + b.d(220.0), row.t, b.edge(row), row.b);
-                b.nodes
-                    .push(Node::Value(self.pt(method_key(method)), value));
+                b.nodes.push(Node::Value(self.method_caption(i), value));
                 b.label(row, b.left(row), value.l, self.mon_name(i), None);
+                continue;
+            }
+            let pref = self.method_pref(i);
+            let row = b.row(ROW_H);
+            let prefs = [
+                ColorMethodPref::Auto,
+                ColorMethodPref::Ddc,
+                ColorMethodPref::Gamma,
+            ];
+            let widths =
+                prefs.map(|p| self.method_seg_label(p).chars().count() as f32 * CHAR_W + 24.0);
+            let g = b.slot(row, b.edge(row), widths.iter().sum(), SEG_H);
+            b.nodes.push(Node::Group(g));
+            let mut left = g.l;
+            for (p, w) in prefs.into_iter().zip(widths) {
+                let r = Rect::new(left, g.t, left + b.d(w), g.b);
+                b.ctl(ctl(ColorCtl::Method(i, p)), r);
+                left = r.r;
+            }
+            b.label(row, b.left(row), g.l, self.mon_name(i), None);
+            self.note_row(b, self.method_caption(i));
+            if pref == ColorMethodPref::Ddc {
+                self.note_row(b, self.pt(K::ColorHwNote));
             }
         }
         b.end_card(SECTION_GAP);
+    }
+
+    fn method_pref(&self, i: usize) -> ColorMethodPref {
+        self.snap
+            .config
+            .monitors
+            .get(&self.snap.monitors[i].id)
+            .map(|s| s.color_method)
+            .unwrap_or_default()
+    }
+
+    fn method_seg_label(&self, p: ColorMethodPref) -> String {
+        self.pt(match p {
+            ColorMethodPref::Auto => PlusKey::ColorSegAuto,
+            ColorMethodPref::Ddc => PlusKey::ColorSegHardware,
+            ColorMethodPref::Gamma => PlusKey::ColorSegSoftware,
+        })
+    }
+
+    /// What monitor `i` actually uses (or why it cannot).
+    fn method_caption(&self, i: usize) -> String {
+        let m = &self.snap.monitors[i];
+        let ddc = self.method_pref(i) == ColorMethodPref::Ddc && !m.internal;
+        self.pt(match m.color_method {
+            _ if m.hdr => PlusKey::ColorMethodHdr,
+            _ if ddc && m.color_unsupported => PlusKey::ColorMethodUnsupported,
+            Some(method) => method_key(method),
+            None if ddc => PlusKey::ColorMethodHw,
+            None => PlusKey::ColorMethodGamma,
+        })
     }
 
     /// Title, slider and value of a day/night temperature.
@@ -114,6 +169,11 @@ impl State {
                 util::open_url("ms-settings:nightlight");
                 return None;
             }
+            ColorCtl::Method(i, pref) => {
+                let id = self.snap.monitors.get(i)?.id.clone();
+                return (self.method_pref(i) != pref)
+                    .then_some(Action::Monitor(id, MonitorEdit::ColorMethod(pref)));
+            }
         };
         Some(Action::Auto(edit))
     }
@@ -149,6 +209,13 @@ impl State {
             ColorCtl::WarmRange | ColorCtl::NightLight => {
                 self.draw_button(cv, r, &self.color_btn_label(c), hot)
             }
+            ColorCtl::Method(i, pref) => self.draw_segment(
+                cv,
+                r,
+                &self.method_seg_label(pref),
+                self.method_pref(i) == pref,
+                hot,
+            ),
         }
     }
 }

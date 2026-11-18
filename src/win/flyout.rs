@@ -14,7 +14,11 @@
 use super::icon::{color_f, has_family};
 use super::theme::Theme;
 use super::util;
+#[cfg(feature = "plus")]
+use crate::auto::color::{MAX_K, kelvin_step, step_kelvin, tint, ui_steps};
 use crate::color::{PALETTE, Rgb};
+#[cfg(feature = "plus")]
+use crate::i18n::PlusKey;
 use crate::i18n::{Key, Lang, tr};
 use crate::link::link_master;
 use std::cell::{Cell, RefCell};
@@ -70,6 +74,16 @@ pub struct FlyoutRow {
     pub link_max: u8,
 }
 
+/// Plus: the color temperature slider as the flyout shows it.
+#[cfg(feature = "plus")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ColorRow {
+    /// What the displays show now (kelvin).
+    pub kelvin: u32,
+    /// The warm end of the slider (kelvin).
+    pub min_k: u32,
+}
+
 /// What the user asked for; delivered through the function given to [`init`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
@@ -80,6 +94,12 @@ pub enum Action {
     SetLinked(bool),
     /// A monitor's calibrated range changed: `(uid, min, max)`.
     SetLinkRange(u32, u8, u8),
+    /// Plus: the color temperature slider is being dragged (kelvin): show it, nothing more.
+    #[cfg(feature = "plus")]
+    PreviewKelvin(u32),
+    /// Plus: the color temperature was chosen (kelvin): drag released, wheel or key.
+    #[cfg(feature = "plus")]
+    SetKelvin(u32),
     Rescan,
     Settings,
 }
@@ -113,7 +133,14 @@ fn class_name() -> Vec<u16> {
 }
 
 /// Open the flyout near `anchor` (screen coordinates of the clicked tray icon).
-pub fn show(anchor: POINT, rows: Vec<FlyoutRow>, linked: bool, lang: Lang) {
+/// `color` (Plus): the color temperature slider; `None` hides it.
+pub fn show(
+    anchor: POINT,
+    rows: Vec<FlyoutRow>,
+    linked: bool,
+    lang: Lang,
+    #[cfg(feature = "plus")] color: Option<ColorRow>,
+) {
     // A click on the tray icon first deactivates (closes) the flyout, then arrives here: ignore it.
     if is_visible() || CLOSED_AT.get().is_some_and(|t| t.elapsed() < REOPEN_GUARD) {
         return;
@@ -121,7 +148,14 @@ pub fn show(anchor: POINT, rows: Vec<FlyoutRow>, linked: bool, lang: Lang) {
     let Some(mut st) = State::create() else {
         return;
     };
-    st.open(anchor, rows, linked, lang);
+    st.open(
+        anchor,
+        rows,
+        linked,
+        lang,
+        #[cfg(feature = "plus")]
+        color,
+    );
     let hwnd = st.hwnd;
     STATE.with(|s| *s.borrow_mut() = Some(st));
     let (x, y, w, h) = sync_geometry().unwrap_or_default();
@@ -134,8 +168,15 @@ pub fn show(anchor: POINT, rows: Vec<FlyoutRow>, linked: bool, lang: Lang) {
 }
 
 /// New values/colors while open. Does not disturb a drag in progress.
-pub fn update(rows: Vec<FlyoutRow>) {
-    if with_state(|st| st.merge(rows)) == Some(true) {
+pub fn update(rows: Vec<FlyoutRow>, #[cfg(feature = "plus")] color: Option<ColorRow>) {
+    let changed = with_state(|st| {
+        st.merge(
+            rows,
+            #[cfg(feature = "plus")]
+            color,
+        )
+    });
+    if changed == Some(true) {
         refresh_window();
     }
 }
@@ -173,6 +214,9 @@ const CAPTION_H: f32 = 24.0;
 const PICKER_H: f32 = 28.0;
 const SLIDER_H: f32 = 48.0;
 const FOOTER_H: f32 = 52.0;
+/// The color temperature slider under its caption.
+#[cfg(feature = "plus")]
+const COLOR_H: f32 = 40.0;
 const DOT: f32 = 8.0;
 const GLYPH_W: f32 = 24.0;
 const VALUE_W: f32 = 40.0;
@@ -235,16 +279,18 @@ struct SliderGeom {
     /// Everything that starts a drag (the track and thumb).
     grab: Rect,
     scale: f32,
+    /// The largest value (the right end): 100, or the color slider's steps.
+    max: u8,
 }
 
 impl SliderGeom {
     fn x_of(&self, v: u8) -> f32 {
-        self.x0 + (self.x1 - self.x0) * f32::from(v.min(100)) / 100.0
+        self.x0 + (self.x1 - self.x0) * f32::from(v.min(self.max)) / f32::from(self.max)
     }
     fn value_at(&self, x: f32) -> u8 {
-        (((x - self.x0) / (self.x1 - self.x0)) * 100.0)
+        (((x - self.x0) / (self.x1 - self.x0)) * f32::from(self.max))
             .round()
-            .clamp(0.0, 100.0) as u8
+            .clamp(0.0, f32::from(self.max)) as u8
     }
     /// Hit area of a calibration handle for `v`, below the thumb.
     fn handle_rect(&self, v: u8) -> Rect {
@@ -270,6 +316,9 @@ struct Layout {
     header: Rect,
     master: Option<Block>,
     monitors: Vec<Block>,
+    /// Plus: caption and slider of the color temperature.
+    #[cfg(feature = "plus")]
+    color: Option<(Rect, SliderGeom)>,
     footer: Rect,
     link: Rect,
     switch: Rect,
@@ -283,6 +332,9 @@ struct Layout {
 enum Slider {
     Master,
     Row(usize),
+    /// Plus: color temperature, in steps of 50 K.
+    #[cfg(feature = "plus")]
+    Color,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -308,6 +360,8 @@ impl Layout {
         match id {
             Slider::Master => self.master.as_ref().map(|b| &b.slider),
             Slider::Row(i) => self.monitors.get(i).map(|b| &b.slider),
+            #[cfg(feature = "plus")]
+            Slider::Color => self.color.as_ref().map(|c| &c.1),
         }
     }
 
@@ -340,6 +394,10 @@ impl Layout {
             .is_some_and(|m| m.slider.grab.contains(x, y))
         {
             return Hit::Slider(Slider::Master);
+        }
+        #[cfg(feature = "plus")]
+        if self.color.as_ref().is_some_and(|c| c.1.grab.contains(x, y)) {
+            return Hit::Slider(Slider::Color);
         }
         if self.link.contains(x, y) {
             Hit::Link
@@ -444,6 +502,15 @@ struct State {
     master: u8,
     /// The master was moved by the user: keep it instead of deriving it from the rows.
     master_touched: bool,
+    /// Plus: color temperature slider position (`None`: no slider).
+    #[cfg(feature = "plus")]
+    color: Option<u8>,
+    /// Plus: the warm end of the color slider (kelvin).
+    #[cfg(feature = "plus")]
+    color_min: u32,
+    /// Plus: the color slider moved during the current drag (a final value is due).
+    #[cfg(feature = "plus")]
+    color_moved: bool,
     picker: Option<usize>,
     focus: Option<Slider>,
     focus_visible: bool,
@@ -474,20 +541,25 @@ fn emit(action: Option<Action>) {
     }
 }
 
-fn focusable(rows: &[FlyoutRow], linked: bool) -> Vec<Slider> {
-    let rows = rows
-        .iter()
-        .enumerate()
-        .filter(|(_, r)| r.enabled && r.value.is_some())
-        .map(|(i, _)| Slider::Row(i));
-    linked
-        .then_some(Slider::Master)
-        .into_iter()
-        .chain(rows)
-        .collect()
-}
-
 impl State {
+    /// The sliders the keyboard can reach, in Tab order.
+    fn focusable(&self) -> Vec<Slider> {
+        let rows = self
+            .rows
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.enabled && r.value.is_some())
+            .map(|(i, _)| Slider::Row(i));
+        let order = self
+            .linked
+            .then_some(Slider::Master)
+            .into_iter()
+            .chain(rows);
+        #[cfg(feature = "plus")]
+        let order = order.chain(self.color.map(|_| Slider::Color));
+        order.collect()
+    }
+
     fn scale(&self) -> f32 {
         self.dpi as f32 / 96.0
     }
@@ -518,6 +590,7 @@ impl State {
                     cy + 11.0 * s,
                 ),
                 scale: s,
+                max: 100,
             }
         };
         let block = |top: f32, swatches: bool| {
@@ -561,6 +634,16 @@ impl State {
                 b
             })
             .collect();
+        #[cfg(feature = "plus")]
+        let color = self.color.map(|_| {
+            let caption = Rect::new(PAD * s, y, width - PAD * s, y + CAPTION_H * s);
+            let slider = SliderGeom {
+                max: ui_steps(self.color_min),
+                ..slider_at(y + CAPTION_H * s)
+            };
+            y += (CAPTION_H + COLOR_H) * s;
+            (caption, slider)
+        });
         let footer = Rect::new(0.0, y, width, y + FOOTER_H * s);
         let cy = footer.cy();
         let button = |offset: f32| {
@@ -580,6 +663,8 @@ impl State {
             header,
             master,
             monitors,
+            #[cfg(feature = "plus")]
+            color,
             footer,
             link: Rect::new(
                 PAD * s,
@@ -630,7 +715,14 @@ impl State {
 
     // --- opening and updating --------------------------------------------
 
-    fn open(&mut self, anchor: POINT, rows: Vec<FlyoutRow>, linked: bool, lang: Lang) {
+    fn open(
+        &mut self,
+        anchor: POINT,
+        rows: Vec<FlyoutRow>,
+        linked: bool,
+        lang: Lang,
+        #[cfg(feature = "plus")] color: Option<ColorRow>,
+    ) {
         self.rows = rows;
         self.linked = linked;
         self.lang = lang;
@@ -639,8 +731,13 @@ impl State {
         self.drag = None;
         self.wheel_rem = 0;
         self.master_touched = false;
+        #[cfg(feature = "plus")]
+        {
+            self.set_color(color);
+            self.color_moved = false;
+        }
         self.recompute_master();
-        self.focus = focusable(&self.rows, linked).first().copied();
+        self.focus = self.focusable().first().copied();
         self.focus_visible = false;
 
         // SAFETY: plain monitor queries with valid out-pointers.
@@ -681,9 +778,32 @@ impl State {
         }
     }
 
+    /// Take the color slider's position and range.
+    #[cfg(feature = "plus")]
+    fn set_color(&mut self, color: Option<ColorRow>) {
+        if let Some(c) = color {
+            self.color_min = c.min_k;
+        }
+        self.color = color.map(|c| kelvin_step(c.kelvin, c.min_k));
+    }
+
     /// Take new rows; returns whether anything visible changed. Values and link ranges of
     /// the control being dragged are kept, the user's hand wins over a late read.
-    fn merge(&mut self, mut rows: Vec<FlyoutRow>) -> bool {
+    fn merge(
+        &mut self,
+        mut rows: Vec<FlyoutRow>,
+        #[cfg(feature = "plus")] color: Option<ColorRow>,
+    ) -> bool {
+        #[cfg(feature = "plus")]
+        let color_changed = {
+            let before = (self.color, self.color_min);
+            if self.drag != Some(Drag::Slider(Slider::Color)) {
+                self.set_color(color);
+            }
+            before != (self.color, self.color_min)
+        };
+        #[cfg(not(feature = "plus"))]
+        let color_changed = false;
         let same_monitors = rows.len() == self.rows.len()
             && rows.iter().zip(&self.rows).all(|(a, b)| a.uid == b.uid);
         if same_monitors {
@@ -701,7 +821,7 @@ impl State {
             self.focus = None;
         }
         if rows == self.rows {
-            return false;
+            return color_changed;
         }
         self.rows = rows;
         if !self.master_touched {
@@ -738,11 +858,22 @@ impl State {
         match id {
             Slider::Master => Some(self.master),
             Slider::Row(i) => self.rows.get(i).and_then(|r| r.value),
+            #[cfg(feature = "plus")]
+            Slider::Color => self.color,
+        }
+    }
+
+    /// The largest value of slider `id`.
+    fn max_of(&self, id: Slider) -> u8 {
+        match id {
+            #[cfg(feature = "plus")]
+            Slider::Color => ui_steps(self.color_min),
+            _ => 100,
         }
     }
 
     fn set_value(&mut self, id: Slider, v: u8) -> Option<Action> {
-        let v = v.min(100);
+        let v = v.min(self.max_of(id));
         if self.value_of(id) == Some(v) {
             return None;
         }
@@ -757,6 +888,18 @@ impl State {
                 let row = self.rows.get_mut(i)?;
                 row.value = Some(v);
                 Some(Action::SetBrightness(row.uid, v))
+            }
+            #[cfg(feature = "plus")]
+            Slider::Color => {
+                self.color = Some(v);
+                let kelvin = step_kelvin(v, self.color_min);
+                // While dragging only a preview goes out; the release sends the value.
+                if self.drag == Some(Drag::Slider(Slider::Color)) {
+                    self.color_moved = true;
+                    Some(Action::PreviewKelvin(kelvin))
+                } else {
+                    Some(Action::SetKelvin(kelvin))
+                }
             }
         }
     }
@@ -775,6 +918,18 @@ impl State {
         // Calibrating: hold the master still instead of re-deriving it from the rows.
         self.master_touched = true;
         Some(Action::SetLinkRange(row.uid, lo, hi))
+    }
+
+    /// The mouse button went up: end the drag; a moved color slider gets its final value.
+    fn release(&mut self) -> Option<Action> {
+        self.drag = None;
+        #[cfg(feature = "plus")]
+        if std::mem::take(&mut self.color_moved) {
+            return self
+                .color
+                .map(|s| Action::SetKelvin(step_kelvin(s, self.color_min)));
+        }
+        None
     }
 
     fn drag_to(&mut self, x: i32) -> Option<Action> {
@@ -840,12 +995,19 @@ impl State {
         self.wheel_rem += delta;
         let notches = self.wheel_rem / 120;
         self.wheel_rem -= notches * 120;
-        self.nudge(id, notches * if fine { 1 } else { WHEEL_STEP })
+        // A color notch is 100 K, or 50 K with Shift: two steps or one.
+        let step = match (id, fine) {
+            (_, true) => 1,
+            #[cfg(feature = "plus")]
+            (Slider::Color, false) => 2,
+            _ => WHEEL_STEP,
+        };
+        self.nudge(id, notches * step)
     }
 
     fn nudge(&mut self, id: Slider, delta: i32) -> Option<Action> {
         let v = i32::from(self.value_of(id)?) + delta;
-        self.set_value(id, v.clamp(0, 100) as u8)
+        self.set_value(id, v.clamp(0, i32::from(self.max_of(id))) as u8)
     }
 
     /// Keyboard: the resulting action, and whether to close the flyout.
@@ -854,7 +1016,7 @@ impl State {
         if vk == VK_ESCAPE.0 {
             return (None, true);
         }
-        let order = focusable(&self.rows, self.linked);
+        let order = self.focusable();
         if vk == VK_TAB.0 {
             if !order.is_empty() {
                 let pos = order.iter().position(|&s| Some(s) == self.focus);
@@ -877,7 +1039,7 @@ impl State {
             v if v == VK_PRIOR.0 => self.nudge(id, 10),
             v if v == VK_NEXT.0 => self.nudge(id, -10),
             v if v == VK_HOME.0 => self.set_value(id, 0),
-            v if v == VK_END.0 => self.set_value(id, 100),
+            v if v == VK_END.0 => self.set_value(id, self.max_of(id)),
             _ => None,
         };
         (action, false)
@@ -1021,6 +1183,95 @@ impl Canvas<'_> {
                 self.pill(r, c.text, 0.8 * a);
             }
         }
+    }
+}
+
+#[cfg(feature = "plus")]
+impl Canvas<'_> {
+    /// A small warm sun: a disc with eight rays, centered in `r`.
+    fn sun(&self, r: Rect) {
+        let s = self.s;
+        let amber = Rgb::new(0xFF, 0xB1, 0x4A);
+        let (cx, cy) = ((r.l + r.r) / 2.0, r.cy());
+        self.circle(cx, cy, 4.0 * s, amber, 1.0);
+        for k in 0..8 {
+            let a = k as f32 * std::f32::consts::FRAC_PI_4;
+            let (sin, cos) = a.sin_cos();
+            // SAFETY: drawing on our own render target between BeginDraw/EndDraw.
+            unsafe {
+                self.rt.DrawLine(
+                    Vector2::new(cx + 6.5 * s * cos, cy + 6.5 * s * sin),
+                    Vector2::new(cx + 9.0 * s * cos, cy + 9.0 * s * sin),
+                    self.pen(amber, 1.0),
+                    1.5 * s,
+                    None,
+                );
+            }
+        }
+    }
+
+    /// Sun, amber-to-white gradient track, thumb in the shown color, value, focus ring.
+    fn color_slider(&self, g: &SliderGeom, step: u8, min_k: u32, look: (bool, bool, bool)) {
+        let (hot, pressed, focused) = look;
+        let (c, s) = (self.colors, self.s);
+        self.sun(g.glyph);
+
+        let (left, right) = (g.x0 - THUMB_R * s, g.x1 + THUMB_R * s);
+        let track = Rect::new(
+            left,
+            g.cy - TRACK_H * s / 2.0,
+            right,
+            g.cy + TRACK_H * s / 2.0,
+        );
+        let stops: [D2D1_GRADIENT_STOP; 5] = std::array::from_fn(|i| {
+            let [r, gr, b] = tint(min_k + (MAX_K - min_k) * i as u32 / 4);
+            D2D1_GRADIENT_STOP {
+                position: i as f32 / 4.0,
+                color: color_f(Rgb::new(r, gr, b), 1.0),
+            }
+        });
+        let props = D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES {
+            startPoint: Vector2::new(left, 0.0),
+            endPoint: Vector2::new(right, 0.0),
+        };
+        // SAFETY: valid render target; the gradient objects live until the end of the block.
+        let gradient = unsafe {
+            self.rt
+                .CreateGradientStopCollection(&stops, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP)
+                .and_then(|coll| self.rt.CreateLinearGradientBrush(&props, None, &coll))
+        };
+        let radius = TRACK_H * s / 2.0;
+        if let Ok(brush) = gradient {
+            // SAFETY: as above.
+            unsafe {
+                self.rt
+                    .FillRoundedRectangle(&rounded(track, radius), &brush)
+            };
+        }
+        // A hairline keeps the white end visible on a light background.
+        // SAFETY: as above.
+        unsafe {
+            self.rt
+                .DrawRoundedRectangle(&rounded(track, radius), self.pen(c.text, 0.25), s, None)
+        };
+
+        let tx = g.x_of(step);
+        let kelvin = step_kelvin(step, min_k);
+        let [r, gr, b] = tint(kelvin);
+        self.circle(tx, g.cy, THUMB_R * s, Rgb::BLACK, 0.25);
+        self.circle(tx, g.cy, (THUMB_R - 0.5) * s, c.thumb, 1.0);
+        let dot = match (pressed, hot) {
+            (true, _) => 5.0,
+            (_, true) => 7.0,
+            _ => 6.0,
+        };
+        self.circle(tx, g.cy, dot * s, Rgb::new(r, gr, b), 1.0);
+        self.ring(tx, g.cy, dot * s, 0.5 * s, c.text, 0.4);
+        if focused {
+            self.ring(tx, g.cy, (THUMB_R + 3.0) * s, 2.0 * s, c.text, 1.0);
+        }
+        let label = format!("{kelvin} K");
+        self.text(&label, &self.fonts.hint, g.value, c.text, 1.0);
     }
 }
 
@@ -1188,6 +1439,20 @@ impl State {
             cv.slider(&b.slider, row.value, row.color, row.enabled, look, range);
         }
 
+        #[cfg(feature = "plus")]
+        if let (Some((caption, g)), Some(step)) = (&layout.color, self.color) {
+            let id = Slider::Color;
+            cv.text(
+                tr(self.lang, Key::Plus(PlusKey::FlyoutColor)),
+                &fonts.caption,
+                *caption,
+                colors.text,
+                0.75,
+            );
+            let look = (hot(id), pressed(id), focused(id));
+            cv.color_slider(g, step, self.color_min, look);
+        }
+
         // Footer: "Link all" switch + label, then the hovered button's label and the buttons.
         let sw = layout.switch;
         let (knob_r, knob_x) = if self.linked {
@@ -1351,6 +1616,12 @@ impl State {
                 applied: (0, 0, 0, 0),
                 master: 0,
                 master_touched: false,
+                #[cfg(feature = "plus")]
+                color: None,
+                #[cfg(feature = "plus")]
+                color_min: MAX_K,
+                #[cfg(feature = "plus")]
+                color_moved: false,
                 picker: None,
                 focus: None,
                 focus_visible: false,
@@ -1446,7 +1717,10 @@ unsafe extern "system" fn wnd_proc(
         WM_ERASEBKGND => return LRESULT(1),
         WM_ACTIVATE => {
             if (wparam.0 & 0xFFFF) as u32 == WA_INACTIVE {
+                // A drag cut short still delivers its final value.
+                let action = with_state(State::release).flatten();
                 close();
+                emit(action);
             }
         }
         WM_DPICHANGED => {
@@ -1485,15 +1759,17 @@ unsafe extern "system" fn wnd_proc(
             refresh_window();
         }
         WM_LBUTTONUP => {
-            with_state(|st| st.drag = None);
+            let action = with_state(State::release).flatten();
             // SAFETY: releases a capture we may hold.
             unsafe {
                 let _ = ReleaseCapture();
             }
+            emit(action);
             refresh_window();
         }
         WM_CAPTURECHANGED => {
-            with_state(|st| st.drag = None);
+            let action = with_state(State::release).flatten();
+            emit(action);
         }
         WM_MOUSEWHEEL => {
             let delta = i32::from((wparam.0 >> 16) as u16 as i16);

@@ -31,7 +31,7 @@ use crate::config::{Config, MonitorSettings};
 use crate::display_id::display_key;
 use crate::i18n::{Key, Lang, tr, tr_with};
 use crate::link::link_value;
-use crate::startup;
+use crate::startup::{self, StaleFix};
 use crate::update::{self, Release};
 use std::cell::RefCell;
 use std::ffi::c_void;
@@ -487,8 +487,19 @@ impl App {
                 tr_with(lang, Key::Updated, update::current_version()),
             ));
         }
-        if autostart::fix_stale() {
-            balloons.push((app_name(), tr(lang, Key::AutostartFixed).to_string()));
+        match autostart::fix_stale() {
+            Some(StaleFix::Moved) => {
+                balloons.push((app_name(), tr(lang, Key::AutostartFixed).to_string()));
+            }
+            Some(StaleFix::Switched) => balloons.push((
+                app_name(),
+                tr_with(
+                    lang,
+                    Key::AutostartSwitched,
+                    &update::product_title("Nitor"),
+                ),
+            )),
+            None => {}
         }
         config.general.autostart = autostart::is_enabled();
         let safe_skip = std::mem::take(&mut config.general.detection_in_progress);
@@ -548,7 +559,8 @@ impl App {
         }
         // Monitors and displays go back to their own colors before the workers stop.
         #[cfg(feature = "plus")]
-        self.color.release(&color_views(&self.monitors));
+        self.color
+            .release(&color_views(&self.monitors, &self.config));
         self.monitors.clear();
         lock(&self.queue).clear();
         self.stop_wheel();
@@ -1227,7 +1239,11 @@ impl App {
     /// Push changed values/colors to an open flyout.
     fn update_flyout(&self) {
         if flyout::is_visible() {
-            flyout::update(self.flyout_rows());
+            flyout::update(
+                self.flyout_rows(),
+                #[cfg(feature = "plus")]
+                self.flyout_color(),
+            );
         }
     }
 
@@ -1240,7 +1256,14 @@ impl App {
                 self.read_all();
             }
             let linked = self.config.general.linked;
-            flyout::show(anchor, self.flyout_rows(), linked, self.lang);
+            flyout::show(
+                anchor,
+                self.flyout_rows(),
+                linked,
+                self.lang,
+                #[cfg(feature = "plus")]
+                self.flyout_color(),
+            );
         }
     }
 
@@ -1301,6 +1324,12 @@ impl App {
                     self.apply_master(i, flyout::master());
                 }
             }
+            #[cfg(feature = "plus")]
+            Action::PreviewKelvin(k) => self
+                .color
+                .preview(&color_views(&self.monitors, &self.config), k),
+            #[cfg(feature = "plus")]
+            Action::SetKelvin(k) => self.set_manual_kelvin(k),
             Action::Rescan => self.rescan(),
             Action::Settings => self.open_settings(),
         }
@@ -1349,6 +1378,10 @@ impl App {
                     internal: m.row.internal,
                     #[cfg(feature = "plus")]
                     color_method: self.color.method(&m.row.id),
+                    #[cfg(feature = "plus")]
+                    color_unsupported: self.color.unsupported(&m.row.id),
+                    #[cfg(feature = "plus")]
+                    hdr: m.row.hdr,
                 }
             })
             .collect();
@@ -1443,6 +1476,8 @@ impl App {
         let entry = self.config.monitors.entry(id.to_string()).or_default();
         match edit {
             MonitorEdit::Color(color) => self.set_color(i, color),
+            #[cfg(feature = "plus")]
+            MonitorEdit::ColorMethod(method) => entry.color_method = method,
             MonitorEdit::Alias(alias) => {
                 entry.alias = alias.clone();
                 self.monitors[i].row.alias = alias;
@@ -1659,9 +1694,35 @@ impl App {
         }
         self.color.plan(
             &self.config,
-            &color_views(&self.monitors),
+            &color_views(&self.monitors, &self.config),
             self.auto.pause_until(),
         );
+    }
+
+    /// The flyout's color slider: it starts at the temperature the displays show, and its
+    /// warm end is the Settings floor. `None` hides it, as no display could take a color
+    /// change (all in HDR).
+    fn flyout_color(&self) -> Option<flyout::ColorRow> {
+        self.monitors
+            .iter()
+            .any(|m| m.row.active && !m.row.hdr)
+            .then(|| flyout::ColorRow {
+                kelvin: self.color.current(),
+                min_k: color_floor(self.config.auto.experimental_warm),
+            })
+    }
+
+    /// The user chose a temperature in the flyout. While color is automatic it holds the
+    /// plan off like a manual brightness change; otherwise it is the fixed temperature
+    /// (neutral at 6500 K), kept in the config.
+    fn set_manual_kelvin(&mut self, kelvin: u32) {
+        if self.config.auto.color_enabled {
+            self.color.hold(&self.config, kelvin);
+        } else {
+            self.config.auto.manual_kelvin = (kelvin < MAX_K).then_some(kelvin as u16);
+            self.save();
+        }
+        self.color_replan();
     }
 
     /// A change from the Settings window; `on_settings` saves and replans afterwards.
@@ -1730,7 +1791,7 @@ impl App {
 
 /// The colour engine's view of the monitors.
 #[cfg(feature = "plus")]
-fn color_views(monitors: &[Monitor]) -> Vec<auto::ColorView<'_>> {
+fn color_views<'a>(monitors: &'a [Monitor], config: &Config) -> Vec<auto::ColorView<'a>> {
     monitors
         .iter()
         .map(|m| auto::ColorView {
@@ -1739,6 +1800,11 @@ fn color_views(monitors: &[Monitor]) -> Vec<auto::ColorView<'_>> {
             // External monitors only: built-in panels (WMI) take the gamma path.
             ddc: m.worker.as_ref().filter(|_| !m.row.internal),
             hdr: m.row.hdr,
+            pref: config
+                .monitors
+                .get(&m.row.id)
+                .map(|s| s.color_method)
+                .unwrap_or_default(),
         })
         .collect()
 }

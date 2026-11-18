@@ -7,7 +7,8 @@ use windows::Win32::System::Registry::{
 use windows::core::{PCWSTR, Result};
 
 use super::util::{exe_path, from_wide, wide};
-use crate::startup::{self, RunEntry};
+use crate::startup::{self, RunEntry, StaleFix};
+use std::path::Path;
 
 const SUBKEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 const VALUE: &str = "Nitor";
@@ -77,16 +78,19 @@ pub fn set(enabled: bool) -> Result<()> {
 }
 
 /// If the Run value exists but points to a different path, rewrite it to the current
-/// exe and return `true`. An entry for the current exe without `--autostart` (older
-/// versions) is upgraded silently.
-pub fn fix_stale() -> bool {
-    let Some(cur) = read() else { return false };
+/// exe (the last one run wins) and say why. An entry for the current exe without
+/// `--autostart` (older versions) is upgraded silently.
+pub fn fix_stale() -> Option<StaleFix> {
+    let cur = read()?;
     match startup::classify_run(&cur, &exe_path().to_string_lossy()) {
-        RunEntry::Current => false,
+        RunEntry::Current => None,
         RunEntry::NeedsFlag => {
             let _ = write();
-            false
+            None
         }
-        RunEntry::Stale => write() == ERROR_SUCCESS,
+        RunEntry::Stale => {
+            let old_exists = Path::new(startup::run_path(&cur)).exists();
+            (write() == ERROR_SUCCESS).then(|| startup::stale_fix(old_exists))
+        }
     }
 }

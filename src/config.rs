@@ -77,6 +77,8 @@ pub struct MonitorSettings {
     pub badge: Option<char>,
     /// Hidden from the tray.
     pub hidden: bool,
+    /// Plus: how its color temperature is set.
+    pub color_method: ColorMethodPref,
 }
 
 impl Default for MonitorSettings {
@@ -92,6 +94,7 @@ impl Default for MonitorSettings {
             link_max: 100,
             badge: None,
             hidden: false,
+            color_method: ColorMethodPref::Auto,
         }
     }
 }
@@ -112,6 +115,28 @@ pub enum OverrideMode {
     Minutes,
 }
 
+/// How a monitor gets its color temperature (Nitor Plus; `[monitor.<id>] color_method`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ColorMethodPref {
+    /// Software: a gamma ramp, which always works and never touches the monitor's memory.
+    #[default]
+    Auto,
+    /// RGB gains over DDC/CI, if the monitor really applies them.
+    Ddc,
+    /// Software, chosen explicitly.
+    Gamma,
+}
+
+impl ColorMethodPref {
+    fn parse(v: &str) -> ColorMethodPref {
+        match v.trim().to_ascii_lowercase().as_str() {
+            "ddc" | "hardware" => ColorMethodPref::Ddc,
+            "gamma" | "software" => ColorMethodPref::Gamma,
+            _ => ColorMethodPref::Auto,
+        }
+    }
+}
+
 /// `[auto]` section: Nitor Plus automation. Parsed always, only acted on in Plus builds.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Auto {
@@ -128,6 +153,8 @@ pub struct Auto {
     pub night_kelvin: u32,
     /// Allow colour temperatures below 4000 K (needs the GdiIcmGammaRange registry value).
     pub experimental_warm: bool,
+    /// Fixed temperature set from the flyout while automatic color is off; `None`: neutral.
+    pub manual_kelvin: Option<u16>,
     pub override_mode: OverrideMode,
     pub override_minutes: u32,
 }
@@ -150,6 +177,7 @@ impl Default for Auto {
             day_kelvin: 6500,
             night_kelvin: 4000,
             experimental_warm: false,
+            manual_kelvin: None,
             override_mode: OverrideMode::UntilTransition,
             override_minutes: 60,
         }
@@ -322,6 +350,13 @@ impl Config {
             if m.hidden {
                 o += "hidden = true\n";
             }
+            match m.color_method {
+                ColorMethodPref::Auto => {}
+                ColorMethodPref::Ddc => o += "color_method = ddc          ; auto | ddc | gamma\n",
+                ColorMethodPref::Gamma => {
+                    o += "color_method = gamma          ; auto | ddc | gamma\n"
+                }
+            }
         }
         o += "\n[hotkeys]\n";
         for (k, v) in &self.hotkeys {
@@ -443,6 +478,9 @@ impl Auto {
                     .clamp(1000, 6500)
             }
             "experimental_warm" => self.experimental_warm = parse_bool(v, d.experimental_warm),
+            "manual_kelvin" => {
+                self.manual_kelvin = parse_num::<u16>(v).map(|k| k.clamp(1000, 6500))
+            }
             "override_mode" => {
                 self.override_mode = match v.to_ascii_lowercase().as_str() {
                     "minutes" => OverrideMode::Minutes,
@@ -480,6 +518,9 @@ impl Auto {
         o += &format!("day_kelvin = {}\n", self.day_kelvin);
         o += &format!("night_kelvin = {}\n", self.night_kelvin);
         o += &format!("experimental_warm = {}\n", self.experimental_warm);
+        if let Some(k) = self.manual_kelvin {
+            o += &format!("manual_kelvin = {k}\n");
+        }
         let mode = match self.override_mode {
             OverrideMode::UntilTransition => "until_transition",
             OverrideMode::Minutes => "minutes",
@@ -503,6 +544,7 @@ impl MonitorSettings {
             "link_max" => self.link_max = parse_num::<u8>(v).unwrap_or(100).min(100),
             "badge" => self.badge = v.chars().next(),
             "hidden" => self.hidden = parse_bool(v, false),
+            "color_method" => self.color_method = ColorMethodPref::parse(v),
             _ => return,
         }
         if self.min > self.max {
@@ -576,6 +618,7 @@ mod tests {
             day_kelvin: 6000,
             night_kelvin: 3200,
             experimental_warm: true,
+            manual_kelvin: Some(4200),
             override_mode: OverrideMode::Minutes,
             override_minutes: 30,
         };
@@ -592,6 +635,7 @@ mod tests {
                 link_max: 80,
                 badge: Some('D'),
                 hidden: true,
+                color_method: ColorMethodPref::Ddc,
             },
         );
         c.monitors
@@ -656,7 +700,7 @@ mod tests {
     fn auto_parsing_is_lenient() {
         let c = Config::parse(
             "[auto]\nenabled = yes\nlatitude = 95\nlongitude = abc\nlocation_source = windows\n\
-             day_brightness = 300\nday_kelvin = 100\nnight_kelvin = 99999\noverride_mode = Minutes\n\
+             day_brightness = 300\nday_kelvin = 100\nnight_kelvin = 99999\nmanual_kelvin = 10\noverride_mode = Minutes\n\
              override_minutes = 0\nunknown = 1\n",
         );
         let a = &c.auto;
@@ -666,6 +710,13 @@ mod tests {
         assert_eq!(a.location_source, LocationSource::Windows);
         assert_eq!(a.day_brightness, 80);
         assert_eq!((a.day_kelvin, a.night_kelvin), (1000, 6500));
+        assert_eq!(a.manual_kelvin, Some(1000));
+        assert_eq!(
+            Config::parse("[auto]\nmanual_kelvin = x\n")
+                .auto
+                .manual_kelvin,
+            None
+        );
         assert_eq!(a.override_mode, OverrideMode::Minutes);
         assert_eq!(a.override_minutes, 1);
         assert_eq!(
@@ -683,6 +734,18 @@ mod tests {
         assert_eq!(c.general.tray_style, TrayStyle::Text);
         assert_eq!(c.monitors["M"].color, None);
         assert_eq!(c.monitors["M"].max, 100);
+        assert_eq!(c.monitors["M"].color_method, ColorMethodPref::Auto);
+        for (text, want) in [
+            ("DDC", ColorMethodPref::Ddc),
+            ("hardware", ColorMethodPref::Ddc),
+            (" Gamma ", ColorMethodPref::Gamma),
+            ("software", ColorMethodPref::Gamma),
+            ("auto", ColorMethodPref::Auto),
+            ("???", ColorMethodPref::Auto),
+        ] {
+            let c = Config::parse(&format!("[monitor.M]\ncolor_method = {text}\n"));
+            assert_eq!(c.monitors["M"].color_method, want, "{text}");
+        }
     }
 
     #[test]

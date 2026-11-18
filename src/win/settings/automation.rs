@@ -2,7 +2,7 @@
 //! place search. A child module of `settings`, so it builds on that file's private pieces.
 
 use super::*;
-use crate::auto::geocode::{self, Place};
+use crate::auto::geocode::Place;
 use crate::auto::map::round2;
 use crate::win::geo;
 
@@ -41,10 +41,7 @@ enum Status {
     #[default]
     Idle,
     Searching,
-    NoResults {
-        /// The query was only digits: suggest the city name.
-        digits: bool,
-    },
+    NoResults,
     Failed,
 }
 
@@ -230,8 +227,7 @@ impl State {
         let note = match self.auto.status {
             Status::Idle => K::LocSearchNote,
             Status::Searching => K::LocSearching,
-            Status::NoResults { digits: false } => K::LocNoResults,
-            Status::NoResults { digits: true } => K::LocNoResultsDigits,
+            Status::NoResults => K::LocNoResults,
             Status::Failed => K::LocSearchFailed,
         };
         self.note_row(b, self.pt(note));
@@ -364,10 +360,7 @@ impl State {
         match geo::take(self.auto.ticket) {
             None => return,
             Some(None) => self.auto.status = Status::Failed,
-            Some(Some(places)) if places.is_empty() => {
-                let digits = geocode::is_numeric_query(&self.auto.query);
-                self.auto.status = Status::NoResults { digits };
-            }
+            Some(Some(places)) if places.is_empty() => self.auto.status = Status::NoResults,
             Some(Some(places)) => {
                 self.auto.places = places;
                 self.auto.status = Status::Idle;
@@ -474,12 +467,8 @@ impl State {
                 if hot {
                     cv.fill(r, 0.0, pal.text, 0.06);
                 }
-                let name = Rect::new(r.l + PAD * s, r.t, r.r - (PAD + 92.0) * s, r.b);
+                let name = Rect::new(r.l + PAD * s, r.t, r.r - PAD * s, r.b);
                 cv.text(&p.label(), &fonts.body, name, pal.text, 1.0);
-                if let Some(code) = p.postcodes.first() {
-                    let at = Rect::new(r.r - (PAD + 84.0) * s, r.t, r.r - PAD * s, r.b);
-                    cv.text(code, &fonts.value, at, pal.text, 0.6);
-                }
             }
         }
     }

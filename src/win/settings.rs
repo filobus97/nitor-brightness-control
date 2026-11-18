@@ -55,14 +55,14 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, EN_KILLFOCUS, EN_SETFOCUS, ES_AUTOHSCROLL,
-    GetClientRect, GetCursorPos, GetParent, GetWindowTextW, IDC_ARROW, IsIconic, LoadCursorW,
-    RegisterClassExW, SW_HIDE, SW_RESTORE, SW_SHOW, SWP_NOACTIVATE, SWP_NOZORDER, SWP_SHOWWINDOW,
-    SendMessageW, SetForegroundWindow, SetWindowPos, SetWindowTextW, ShowWindow, WINDOW_EX_STYLE,
-    WINDOW_STYLE, WM_APP, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_COMMAND, WM_CTLCOLOREDIT,
-    WM_CTLCOLORSTATIC, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCDESTROY, WM_PAINT, WM_SETFONT,
-    WM_SETTINGCHANGE, WM_SIZE, WNDCLASSEXW, WS_CAPTION, WS_CHILD, WS_CLIPCHILDREN, WS_MINIMIZEBOX,
-    WS_OVERLAPPED, WS_SYSMENU,
+    GetClientRect, GetCursorPos, GetParent, GetWindowTextW, IDC_ARROW, IsIconic, LWA_ALPHA,
+    LoadCursorW, RegisterClassExW, SW_HIDE, SW_RESTORE, SW_SHOW, SWP_NOACTIVATE, SWP_NOZORDER,
+    SWP_SHOWWINDOW, SendMessageW, SetForegroundWindow, SetLayeredWindowAttributes, SetWindowPos,
+    SetWindowTextW, ShowWindow, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CAPTURECHANGED, WM_CHAR,
+    WM_CLOSE, WM_COMMAND, WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DPICHANGED,
+    WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL,
+    WM_NCDESTROY, WM_PAINT, WM_SETFONT, WM_SETTINGCHANGE, WM_SIZE, WNDCLASSEXW, WS_CAPTION,
+    WS_CHILD, WS_CLIPCHILDREN, WS_EX_LAYERED, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_SYSMENU,
 };
 use windows::core::{HRESULT, HSTRING, PCWSTR, w};
 use windows_numerics::{Matrix3x2, Vector2};
@@ -99,6 +99,12 @@ pub struct MonitorInfo {
     /// Plus: how its color temperature is set (`None` until decided or while off).
     #[cfg(feature = "plus")]
     pub color_method: Option<crate::auto::color::Method>,
+    /// Plus: its video gains did not work this session (it uses gamma).
+    #[cfg(feature = "plus")]
+    pub color_unsupported: bool,
+    /// Plus: HDR / advanced color is on (no color change possible).
+    #[cfg(feature = "plus")]
+    pub hdr: bool,
 }
 
 /// Where the update check stands, shown in the General card.
@@ -151,6 +157,9 @@ pub enum MonitorEdit {
     Shown(bool),
     /// Brightness limits `(min, max)`.
     Limits(u8, u8),
+    /// Plus: how its color temperature is set.
+    #[cfg(feature = "plus")]
+    ColorMethod(crate::config::ColorMethodPref),
     MoveUp,
     MoveDown,
 }
@@ -1331,8 +1340,12 @@ impl State {
     fn make_edit(&self, mon: &str, kind: Kind) -> Option<Edit> {
         // SAFETY: plain child window creation; the subclass procedure is a static function.
         unsafe {
+            // Layered + fully opaque: the window extends Mica over its whole client area,
+            // and GDI (which the EDIT draws with) leaves alpha at 0, so a plain child
+            // EDIT would show the backdrop through it. A layered child gets its own
+            // opaque surface instead (Windows 8+).
             let hwnd = CreateWindowExW(
-                WINDOW_EX_STYLE(0),
+                WS_EX_LAYERED,
                 w!("EDIT"),
                 PCWSTR::null(),
                 WS_CHILD | WINDOW_STYLE(ES_AUTOHSCROLL as u32),
@@ -1346,6 +1359,7 @@ impl State {
                 None,
             )
             .ok()?;
+            let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_ALPHA);
             let limit = match kind {
                 Kind::Alias => 32,
                 Kind::Badge => 2,
