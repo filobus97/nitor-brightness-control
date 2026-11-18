@@ -2,6 +2,7 @@
 //! - `app`: UI thread, message window, glue between everything below.
 //! - `monitors` + `ddc`: discovery, identity, DDC/CI worker threads.
 //! - `icon` + `theme`: tray icon rendering and taskbar/app theme.
+//! - `flyout` + `settings`: the Direct2D flyout and the Settings window.
 //! - `update`: WinHTTP release check and self-update.
 //! - `tray`, `wheel`, `instance`, `autostart`, `util`: small Win32 wrappers.
 
@@ -12,6 +13,7 @@ pub mod flyout;
 pub mod icon;
 pub mod instance;
 pub mod monitors;
+pub mod settings;
 pub mod theme;
 pub mod tray;
 pub mod update;
@@ -61,7 +63,8 @@ pub fn main() -> i32 {
         &util::exe_dir(),
         util::appdata_dir().as_deref(),
     );
-    util::install_panic_hook(config_path.with_file_name("Nitor.log"));
+    util::set_log_path(config_path.with_file_name("Nitor.log"));
+    util::install_panic_hook();
 
     match instance::acquire() {
         Instance::Secondary(hwnd) => forward_to_primary(hwnd, &args),

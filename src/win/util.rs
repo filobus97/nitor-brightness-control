@@ -3,6 +3,7 @@
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use windows::Win32::Globalization::{
@@ -105,14 +106,32 @@ fn shell_open(target: &str) {
     }
 }
 
-/// Panic hook that appends the panic message to `log_path`, then exits the process.
-pub fn install_panic_hook(log_path: PathBuf) {
-    std::panic::set_hook(Box::new(move |info| {
-        let secs = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs());
-        if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(&log_path) {
-            let _ = writeln!(f, "{secs} {info}");
-        }
-    }));
+static LOG_PATH: OnceLock<PathBuf> = OnceLock::new();
+static LOG_LOCK: Mutex<()> = Mutex::new(());
+/// The log is emptied when it grows past this.
+const LOG_MAX_BYTES: u64 = 256 * 1024;
+
+/// Where `log` writes (`Nitor.log` next to the config). Set once at startup.
+pub fn set_log_path(path: PathBuf) {
+    let _ = LOG_PATH.set(path);
+}
+
+/// Append `<unix secs> <line>` to the log; thread-safe, best effort, no-op before `set_log_path`.
+pub fn log(line: &str) {
+    let Some(path) = LOG_PATH.get() else { return };
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let _guard = LOG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    if std::fs::metadata(path).is_ok_and(|m| m.len() > LOG_MAX_BYTES) {
+        let _ = std::fs::write(path, "");
+    }
+    if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(f, "{secs} {line}");
+    }
+}
+
+/// Panic hook that appends the panic message to the log.
+pub fn install_panic_hook() {
+    std::panic::set_hook(Box::new(|info| log(&info.to_string())));
 }

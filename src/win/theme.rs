@@ -1,18 +1,21 @@
 //! App and taskbar theme from the registry and DWM.
 
 use crate::color::{Rgb, mix};
-use windows::Win32::Foundation::ERROR_SUCCESS;
+use std::sync::OnceLock;
+use windows::Win32::Foundation::{ERROR_SUCCESS, HWND};
 use windows::Win32::Graphics::Dwm::DwmGetColorizationColor;
+use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 use windows::Win32::System::Registry::{
     HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, RRF_RT_REG_DWORD, RRF_RT_REG_SZ, RegGetValueW,
 };
-use windows::core::{BOOL, PCWSTR, w};
+use windows::core::{BOOL, PCSTR, PCWSTR, w};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Theme {
-    /// `AppsUseLightTheme` (flyout).
+    /// `AppsUseLightTheme`: normal app windows (Settings window).
     pub apps_light: bool,
-    /// `SystemUsesLightTheme` (taskbar).
+    /// `SystemUsesLightTheme` ("Windows mode"): taskbar, tray icons, tray menu and flyout,
+    /// like Windows' own tray flyouts.
     pub taskbar_light: bool,
     /// `ColorPrevalence`: taskbar painted with the accent color.
     pub taskbar_accent: bool,
@@ -107,6 +110,90 @@ impl Theme {
             (true, false) => Rgb::new(0xEE, 0xEE, 0xEE),
             (false, true) => Rgb::new(0x20, 0x20, 0x20),
             (false, false) => Rgb::new(0x10, 0x10, 0x10),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Dark mode for native menus (undocumented uxtheme.dll ordinals)
+// ---------------------------------------------------------------------------
+//
+// Win32 popup menus stay light unless the process opts in. The ordinals below are what
+// Windows Terminal, Notepad++ and Twinkle Tray use; they exist on Windows 10 1903+ and 11.
+// Everything fails soft: on older builds or missing exports the menu just stays light.
+
+/// First build with `SetPreferredAppMode` at ordinal 135.
+const MIN_MENU_THEME_BUILD: u32 = 18362;
+/// `PreferredAppMode::ForceDark` / `ForceLight`: ignore the app mode, use ours.
+const APP_MODE_FORCE_DARK: i32 = 2;
+const APP_MODE_FORCE_LIGHT: i32 = 3;
+
+type SetPreferredAppMode = unsafe extern "system" fn(i32) -> i32;
+type FlushMenuThemes = unsafe extern "system" fn();
+type AllowDarkModeForWindow = unsafe extern "system" fn(HWND, BOOL) -> BOOL;
+
+struct Uxtheme {
+    set_preferred_app_mode: SetPreferredAppMode,
+    flush_menu_themes: FlushMenuThemes,
+    allow_dark_mode_for_window: AllowDarkModeForWindow,
+}
+
+/// The uxtheme exports, resolved once (`None`: unsupported).
+fn uxtheme() -> Option<&'static Uxtheme> {
+    static UX: OnceLock<Option<Uxtheme>> = OnceLock::new();
+    UX.get_or_init(|| {
+        if read_build_number()? < MIN_MENU_THEME_BUILD {
+            return None;
+        }
+        // SAFETY: uxtheme.dll is a system DLL that stays loaded for the process lifetime. The
+        // ordinals 133/135/136 have the signatures declared above on every build we gate on.
+        unsafe {
+            let lib = LoadLibraryW(w!("uxtheme.dll")).ok()?;
+            let ordinal = |n: usize| GetProcAddress(lib, PCSTR(n as *const u8));
+            Some(Uxtheme {
+                allow_dark_mode_for_window: std::mem::transmute::<
+                    unsafe extern "system" fn() -> isize,
+                    AllowDarkModeForWindow,
+                >(ordinal(133)?),
+                set_preferred_app_mode: std::mem::transmute::<
+                    unsafe extern "system" fn() -> isize,
+                    SetPreferredAppMode,
+                >(ordinal(135)?),
+                flush_menu_themes: std::mem::transmute::<
+                    unsafe extern "system" fn() -> isize,
+                    FlushMenuThemes,
+                >(ordinal(136)?),
+            })
+        }
+    })
+    .as_ref()
+}
+
+/// Opt the app's window into dark menus and style the menu for the current Windows mode.
+/// Call once at startup, before any menu exists.
+pub fn init_menus(hwnd: HWND, taskbar_light: bool) {
+    if let Some(ux) = uxtheme() {
+        // SAFETY: see `uxtheme`; `hwnd` is our own window.
+        unsafe {
+            let _ = (ux.allow_dark_mode_for_window)(hwnd, BOOL(1));
+        }
+    }
+    set_menu_theme(taskbar_light);
+}
+
+/// Style native menus like the Windows tray flyouts: forced to the Windows mode
+/// (`SystemUsesLightTheme`), not the app mode. Also call on every theme change.
+pub fn set_menu_theme(taskbar_light: bool) {
+    if let Some(ux) = uxtheme() {
+        let mode = if taskbar_light {
+            APP_MODE_FORCE_LIGHT
+        } else {
+            APP_MODE_FORCE_DARK
+        };
+        // SAFETY: see `uxtheme`. Flushing makes the next menu pick up the new mode.
+        unsafe {
+            (ux.set_preferred_app_mode)(mode);
+            (ux.flush_menu_themes)();
         }
     }
 }

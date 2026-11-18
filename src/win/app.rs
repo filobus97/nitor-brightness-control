@@ -11,15 +11,18 @@ use super::flyout::{self, Action, FlyoutRow};
 use super::icon::{self, IconContent, IconRenderer, IconSpec, OwnedIcon};
 use super::instance::{self, WINDOW_CLASS};
 use super::monitors::{self, FoundMonitor};
-use super::theme::Theme;
+use super::settings::{self, MonitorEdit, MonitorInfo, MonitorState, Snapshot};
+use super::theme::{self, Theme};
 use super::tray::{self, TrayEvent, WM_APP_TRAY};
 use super::update::{self as updater, InstallError};
+use super::util::log;
 use super::wheel::{self, WM_APP_WHEEL, WheelEvent};
-use super::wmi::Wmi;
+use super::wmi::{self, Wmi};
 use super::{autostart, util};
 use crate::cli::{self, BrightnessOp, Command, Target};
 use crate::color::{Rgb, next_palette_color};
 use crate::config::{Config, MonitorSettings};
+use crate::display_id::display_key;
 use crate::i18n::{Key, Lang, tr, tr_with};
 use crate::link::link_value;
 use crate::update::{self, Release};
@@ -48,8 +51,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     PostMessageW, PostQuitMessage, RegisterClassExW, RegisterWindowMessageW, SetForegroundWindow,
     SetTimer, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WM_APP, WM_CLOSE,
     WM_CONTEXTMENU, WM_COPYDATA, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_MOUSEMOVE,
-    WM_NULL, WM_POWERBROADCAST, WM_SETTINGCHANGE, WM_TIMER, WNDCLASSEXW, WS_EX_TOOLWINDOW,
-    WS_POPUP,
+    WM_NULL, WM_POWERBROADCAST, WM_SETTINGCHANGE, WM_SYSCOLORCHANGE, WM_THEMECHANGED, WM_TIMER,
+    WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_POPUP,
 };
 use windows::core::{PCWSTR, w};
 
@@ -126,11 +129,14 @@ fn settings_of(config: &Config, id: &str) -> MonitorSettings {
 /// Turn enumerated monitors into rows in tray order (settings order, then left edge),
 /// assigning palette colors to monitors without one (stored into `config`; the flag
 /// says whether that changed it). Hidden and `skip`ped monitors get no backend; built-in
-/// panels get WMI when `config.general.internal_display` is on, else none.
+/// panels get WMI when `config.general.internal_display` is on, else none. A monitor is
+/// built-in if DisplayConfig says so or if its device path matches one of the WMI
+/// `wmi` instance names (which then also selects that WMI instance).
 fn build_entries(
     config: &mut Config,
     mut found: Vec<FoundMonitor>,
     skip: &[String],
+    wmi: &[String],
 ) -> (Vec<Entry>, bool) {
     found.sort_by_cached_key(|f| {
         (
@@ -157,11 +163,32 @@ fn build_entries(
             changed = true;
             c
         });
+        let key = display_key(&f.device_path);
+        let matched = key
+            .as_ref()
+            .and_then(|k| wmi.iter().find(|n| display_key(n).as_ref() == Some(k)));
+        log(&format!(
+            "monitor id={} name={:?} path={} tech={} internal={} wmi={} ddc={}",
+            f.stable_id,
+            f.friendly_name,
+            f.device_path,
+            f.output_tech,
+            f.internal,
+            matched.is_some(),
+            f.handle.is_some()
+        ));
+        f.internal |= matched.is_some();
+        if f.internal {
+            f.friendly_name = tr(pick_lang(config), Key::BuiltInDisplay).to_string();
+        }
         let usable = !s.hidden && !skip.contains(&f.stable_id);
         let backend = match (usable, f.internal) {
             (false, _) => None,
             (true, false) => f.handle.take().map(Backend::Ddc),
-            (true, true) => config.general.internal_display.then_some(Backend::Wmi),
+            (true, true) => config
+                .general
+                .internal_display
+                .then(|| Backend::Wmi(matched.cloned())),
         };
         entries.push(Entry {
             row: Row {
@@ -180,6 +207,16 @@ fn build_entries(
         });
     }
     (entries, changed)
+}
+
+/// `InstanceName`s WMI lists for active brightness-capable panels. Runs on the calling
+/// thread (needs COM); one local query, about 10-50 ms, which is fine at scan time.
+fn wmi_instances() -> Vec<String> {
+    let found = Wmi::connect(None)
+        .map(|w| w.instances())
+        .unwrap_or_default();
+    log(&format!("wmi instances: {found:?}"));
+    found
 }
 
 fn describe(target: &Target) -> String {
@@ -270,6 +307,7 @@ fn query(cmd: &Command, rows: &[&Row]) -> (i32, String) {
 fn list_line(n: usize, r: &Row) -> String {
     let state = match (r.active, r.value) {
         (true, Some(v)) => format!("{v}%"),
+        (true, None) if r.internal => "built-in (no response)".into(),
         (true, None) => "–".into(),
         (false, _) if r.internal_disabled => "built-in (disabled)".into(),
         (false, _) => "not controllable".into(),
@@ -470,7 +508,20 @@ impl App {
         self.clear();
         self.probe_done = false;
         let skip = std::mem::take(&mut self.safe_skip);
-        let (entries, changed) = build_entries(&mut self.config, monitors::enumerate(), &skip);
+        let (entries, changed) = build_entries(
+            &mut self.config,
+            monitors::enumerate(),
+            &skip,
+            &wmi_instances(),
+        );
+        for e in &entries {
+            let backend = match &e.backend {
+                Some(Backend::Ddc(_)) => "ddc".to_string(),
+                Some(Backend::Wmi(i)) => format!("wmi {i:?}"),
+                None => "none".to_string(),
+            };
+            log(&format!("backend id={} {backend}", e.row.id));
+        }
         let probing: Vec<String> = entries
             .iter()
             .filter(|e| e.backend.is_some())
@@ -505,6 +556,7 @@ impl App {
         if !any {
             self.finish_probe();
         }
+        self.update_settings();
     }
 
     fn spawn_worker(&self, key: u64, backend: Backend, interval: Duration) -> DdcWorker {
@@ -549,15 +601,25 @@ impl App {
         }
         let first = !m.probed;
         m.probed = true;
-        if first && event == DdcEvent::Unresponsive {
-            // Not controllable: no icon, release the backend.
+        if first {
+            log(&format!("probe id={} {event:?}", m.row.id));
+        }
+        if first && event == DdcEvent::Unresponsive && !m.row.internal {
+            // Not controllable: no icon, release the backend. (A built-in panel keeps
+            // a dimmed icon so the failure is visible.)
             m.worker = None;
             return;
         }
         m.row.active = true;
         match event {
             DdcEvent::Value(p) => {
-                m.row.value = Some(p);
+                // A read queued before the user's latest change would undo it on screen.
+                if !m
+                    .last_adjust
+                    .is_some_and(|t| t.elapsed() < OWN_CHANGE_WINDOW)
+                {
+                    m.row.value = Some(p);
+                }
                 if m.health != Health::ReadOnly {
                     m.health = Health::Ok;
                 }
@@ -591,6 +653,7 @@ impl App {
                 tray::balloon(self.hwnd, uid, &title, &text);
             }
         }
+        self.update_settings();
         self.maybe_auto_check();
         for cmd in std::mem::take(&mut self.initial) {
             self.exec(&cmd);
@@ -779,6 +842,9 @@ impl App {
                 Some(_) => format!("{name} — {value}"),
                 None => name.to_string(),
             },
+            Health::Unresponsive if m.row.internal && m.row.value.is_none() => {
+                format!("{name} — {}", tr(self.lang, Key::InternalNoResponse))
+            }
             Health::Unresponsive => format!("{name} — {}", tr(self.lang, Key::Unresponsive)),
             Health::ReadOnly => format!(
                 "{name} — {value} ({})\n{}",
@@ -798,6 +864,7 @@ impl App {
         let m = &mut self.monitors[i];
         present(self.hwnd, &self.renderer, m.uid, &mut m.icon, spec, tip);
         self.update_flyout();
+        self.update_settings();
     }
 
     fn refresh_placeholder(&mut self) {
@@ -847,6 +914,8 @@ impl App {
     fn on_theme_change(&mut self, colors_changed: bool) {
         if colors_changed {
             self.theme = Theme::read();
+            flyout::retheme();
+            theme::set_menu_theme(self.theme.taskbar_light);
         }
         self.icon_size = icon::tray_icon_size();
         self.refresh_all();
@@ -1056,11 +1125,140 @@ impl App {
 
     // --- menu -------------------------------------------------------------
 
+    /// Open the Settings window (or bring it to the front).
     fn open_settings(&mut self) {
+        settings::open(self.settings_snapshot());
+    }
+
+    /// Open `Nitor.ini` in the default editor.
+    fn open_config(&mut self) {
         if !self.path.exists() {
             self.save();
         }
         util::open_with_default_app(&self.path);
+    }
+
+    fn settings_snapshot(&self) -> Snapshot {
+        let monitors = self
+            .monitors
+            .iter()
+            .map(|m| {
+                let state = if settings_of(&self.config, &m.row.id).hidden {
+                    MonitorState::Hidden
+                } else if m.row.internal_disabled {
+                    MonitorState::BuiltInOff
+                } else if m.worker.is_none() {
+                    MonitorState::NotControllable
+                } else {
+                    match m.health {
+                        Health::Ok => MonitorState::Active,
+                        Health::Unresponsive => MonitorState::Unresponsive,
+                        Health::ReadOnly => MonitorState::ReadOnly,
+                    }
+                };
+                MonitorInfo {
+                    id: m.row.id.clone(),
+                    friendly: m.row.friendly.clone(),
+                    color: m.row.color,
+                    state,
+                    internal: m.row.internal,
+                }
+            })
+            .collect();
+        Snapshot {
+            config: self.config.clone(),
+            lang: self.lang,
+            monitors,
+        }
+    }
+
+    /// Push the current state to an open Settings window.
+    fn update_settings(&self) {
+        if settings::is_open() {
+            settings::update(self.settings_snapshot());
+        }
+    }
+
+    /// A change made in the Settings window: apply it, save it, show the result.
+    fn on_settings(&mut self, action: settings::Action) {
+        use settings::Action as A;
+        match action {
+            A::Autostart(on) => {
+                let _ = autostart::set(on);
+                self.config.general.autostart = autostart::is_enabled();
+            }
+            A::Language(lang) => {
+                self.config.general.language = lang.map_or("auto", Lang::as_setting).into();
+                self.lang = pick_lang(&self.config);
+                self.refresh_all();
+            }
+            A::InternalDisplay(on) => {
+                self.config.general.internal_display = on;
+                self.save();
+                self.scan();
+            }
+            A::CheckUpdates(on) => self.config.general.check_updates = on,
+            A::CheckNow => self.start_check(true),
+            A::TrayStyle(style) => {
+                self.config.general.tray_style = style;
+                self.refresh_all();
+            }
+            A::WheelStep(step) => self.config.general.wheel_step = step,
+            A::RefreshOnOpen(on) => self.config.general.refresh_on_open = on,
+            A::WriteInterval(ms) => {
+                self.config.general.write_interval_ms = ms;
+                let interval = Duration::from_millis(ms.into());
+                for w in self.monitors.iter().filter_map(|m| m.worker.as_ref()) {
+                    w.set_write_interval(interval);
+                }
+            }
+            A::OpenConfig => self.open_config(),
+            A::Monitor(id, edit) => self.edit_monitor(&id, edit),
+        }
+        self.save();
+        self.update_settings();
+    }
+
+    fn edit_monitor(&mut self, id: &str, edit: MonitorEdit) {
+        let Some(i) = self.monitors.iter().position(|m| m.row.id == id) else {
+            return;
+        };
+        let entry = self.config.monitors.entry(id.to_string()).or_default();
+        match edit {
+            MonitorEdit::Color(color) => self.set_color(i, color),
+            MonitorEdit::Alias(alias) => {
+                entry.alias = alias.clone();
+                self.monitors[i].row.alias = alias;
+                self.refresh(i);
+            }
+            MonitorEdit::Badge(badge) => {
+                entry.badge = badge;
+                self.refresh(i);
+            }
+            MonitorEdit::Limits(min, max) => (entry.min, entry.max) = (min, max),
+            MonitorEdit::Shown(shown) => {
+                entry.hidden = !shown;
+                self.save();
+                flyout::hide();
+                self.scan();
+            }
+            MonitorEdit::MoveUp | MonitorEdit::MoveDown => {
+                let j = if edit == MonitorEdit::MoveUp {
+                    i.checked_sub(1)
+                } else {
+                    Some(i + 1).filter(|&j| j < self.monitors.len())
+                };
+                let Some(j) = j else { return };
+                let mut ids: Vec<String> = self.monitors.iter().map(|m| m.row.id.clone()).collect();
+                ids.swap(i, j);
+                for (k, id) in ids.into_iter().enumerate() {
+                    self.config.monitors.entry(id).or_default().order = Some(k as u32 + 1);
+                }
+                self.save();
+                flyout::hide();
+                self.scan();
+            }
+        }
     }
 
     fn on_menu(&mut self, cmd: u32) {
@@ -1087,6 +1285,7 @@ impl App {
             }
             _ => {}
         }
+        self.update_settings();
     }
 
     // --- power ------------------------------------------------------------
@@ -1226,6 +1425,11 @@ fn present(
 /// Called by the flyout's window procedure (the app is not borrowed there).
 fn on_flyout_action(action: Action) {
     with_app(|a| a.on_flyout(action));
+}
+
+/// Called by the Settings window's window procedure (the app is not borrowed there).
+fn on_settings_action(action: settings::Action) {
+    with_app(|a| a.on_settings(action));
 }
 
 fn on_tray(hwnd: HWND, ev: TrayEvent) {
@@ -1411,6 +1615,10 @@ unsafe extern "system" fn wnd_proc(
             let colors = is_color_change(lparam);
             with_app(|a| a.on_theme_change(colors));
         }
+        // Safety net in case "ImmersiveColorSet" is missed.
+        WM_THEMECHANGED | WM_SYSCOLORCHANGE => {
+            with_app(|a| a.on_theme_change(true));
+        }
         WM_DPICHANGED => {
             with_app(|a| a.on_theme_change(false));
         }
@@ -1479,6 +1687,7 @@ pub fn run(config_path: PathBuf, initial: Vec<Command>, updated: bool) -> i32 {
     // is fine (the manifest sets it too).
     unsafe {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        wmi::init_security();
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     }
     let config = Config::load(&config_path).unwrap_or_default();
@@ -1488,7 +1697,9 @@ pub fn run(config_path: PathBuf, initial: Vec<Command>, updated: bool) -> i32 {
     let Some(hwnd) = create_window() else {
         return 1;
     };
+    theme::init_menus(hwnd, Theme::read().taskbar_light);
     flyout::init(on_flyout_action);
+    settings::init(on_settings_action);
     // SAFETY: valid window handle and GUID; the notification ends with the window.
     unsafe {
         let _ = RegisterPowerSettingNotification(
@@ -1529,21 +1740,21 @@ pub fn run(config_path: PathBuf, initial: Vec<Command>, updated: bool) -> i32 {
 pub fn standalone(config_path: &Path, commands: &[Command]) -> i32 {
     let mut config = Config::load(config_path).unwrap_or_default();
     let skip = config.general.detection_in_progress.clone();
-    let (entries, _) = build_entries(&mut config, monitors::enumerate(), &skip);
     // SAFETY: this thread has no COM apartment yet; WMI needs one for the built-in display.
     let _ = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
-    let wmi = Wmi::connect()
-        .ok()
-        .filter(|_| config.general.internal_display);
+    wmi::init_security();
+    let (entries, _) = build_entries(&mut config, monitors::enumerate(), &skip, &wmi_instances());
     let rows: Vec<Row> = entries
         .into_iter()
         .map(|mut e| {
             e.row.value = match &e.backend {
                 Some(Backend::Ddc(h)) => ddc::read_once(h),
-                Some(Backend::Wmi) => wmi.as_ref().and_then(Wmi::read),
+                Some(Backend::Wmi(i)) => Wmi::connect(i.clone()).and_then(|w| w.read()),
                 None => None,
             };
-            e.row.active = e.row.value.is_some();
+            // A built-in panel that stays silent is still listed (as "no response").
+            e.row.active = e.row.value.is_some() || matches!(e.backend, Some(Backend::Wmi(_)));
+            log(&format!("probe id={} value={:?}", e.row.id, e.row.value));
             e.row
         })
         .collect();

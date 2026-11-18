@@ -18,6 +18,14 @@ impl Lang {
         }
     }
 
+    /// The config value for this language.
+    pub fn as_setting(self) -> &'static str {
+        match self {
+            Lang::En => "en",
+            Lang::It => "it",
+        }
+    }
+
     /// From the config value: `auto` (or empty) → `None`, `en`/`it` → that language.
     pub fn from_setting(value: &str) -> Option<Lang> {
         match value.trim().to_ascii_lowercase().as_str() {
@@ -48,6 +56,10 @@ pub enum Key {
     Updated,
     /// Tooltip suffix for a monitor that doesn't answer.
     Unresponsive,
+    /// Tooltip suffix for the built-in display when it never answered.
+    InternalNoResponse,
+    /// Name of the laptop panel (Windows only reports "Generic PnP Monitor").
+    BuiltInDisplay,
     /// Tooltip suffix for a monitor that rejects writes.
     ReadOnly,
     /// Explanation appended to the read-only tooltip.
@@ -66,6 +78,35 @@ pub enum Key {
     /// Flyout header.
     Brightness,
     LinkAll,
+    /// Settings window.
+    SettingsTitle,
+    SecGeneral,
+    SecTray,
+    SecMonitors,
+    SecAdvanced,
+    LblLanguage,
+    LangAuto,
+    LblCheckUpdates,
+    /// Version line; `{}` is the version.
+    LblVersion,
+    BtnCheckNow,
+    LblTrayStyle,
+    StyleNumber,
+    StylePill,
+    LblWheelStep,
+    LblRefreshOnOpen,
+    LblName,
+    /// Hint under the name field; `{}` is the monitor's own name.
+    HintAlias,
+    LblBadge,
+    LblShowInTray,
+    LblLimits,
+    LblWriteInterval,
+    LblConfigFile,
+    BtnOpenConfig,
+    StateHidden,
+    StateNotControllable,
+    StateBuiltInOff,
 }
 
 /// All keys, for checks that every key is translated.
@@ -84,6 +125,8 @@ const ALL_KEYS: &[Key] = &[
     Key::UpdateFailed,
     Key::Updated,
     Key::Unresponsive,
+    Key::InternalNoResponse,
+    Key::BuiltInDisplay,
     Key::ReadOnly,
     Key::ReadOnlyHint,
     Key::NoMonitors,
@@ -94,6 +137,32 @@ const ALL_KEYS: &[Key] = &[
     Key::HotkeyConflict,
     Key::Brightness,
     Key::LinkAll,
+    Key::SettingsTitle,
+    Key::SecGeneral,
+    Key::SecTray,
+    Key::SecMonitors,
+    Key::SecAdvanced,
+    Key::LblLanguage,
+    Key::LangAuto,
+    Key::LblCheckUpdates,
+    Key::LblVersion,
+    Key::BtnCheckNow,
+    Key::LblTrayStyle,
+    Key::StyleNumber,
+    Key::StylePill,
+    Key::LblWheelStep,
+    Key::LblRefreshOnOpen,
+    Key::LblName,
+    Key::HintAlias,
+    Key::LblBadge,
+    Key::LblShowInTray,
+    Key::LblLimits,
+    Key::LblWriteInterval,
+    Key::LblConfigFile,
+    Key::BtnOpenConfig,
+    Key::StateHidden,
+    Key::StateNotControllable,
+    Key::StateBuiltInOff,
 ];
 
 /// `tr` for a template: `{}` is replaced by `arg`.
@@ -117,6 +186,8 @@ pub fn tr(lang: Lang, key: Key) -> &'static str {
             Key::UpdateFailed => "Update failed: {}",
             Key::Updated => "Updated to {}",
             Key::Unresponsive => "not responding",
+            Key::InternalNoResponse => "the built-in display didn't respond",
+            Key::BuiltInDisplay => "Built-in display",
             Key::ReadOnly => "read-only",
             Key::ReadOnlyHint => {
                 "A monitor preset (game mode, HDR or driver color settings) is locking brightness. Change the preset on the monitor to control it."
@@ -135,6 +206,32 @@ pub fn tr(lang: Lang, key: Key) -> &'static str {
             Key::HotkeyConflict => "Couldn't register hotkey {}: it's used by another app",
             Key::Brightness => "Brightness",
             Key::LinkAll => "Link all",
+            Key::SettingsTitle => "Nitor — Settings",
+            Key::SecGeneral => "General",
+            Key::SecTray => "Tray",
+            Key::SecMonitors => "Monitors",
+            Key::SecAdvanced => "Advanced",
+            Key::LblLanguage => "Language",
+            Key::LangAuto => "Auto",
+            Key::LblCheckUpdates => "Check for updates automatically",
+            Key::LblVersion => "Version {}",
+            Key::BtnCheckNow => "Check now",
+            Key::LblTrayStyle => "Icon style",
+            Key::StyleNumber => "Number",
+            Key::StylePill => "Pill",
+            Key::LblWheelStep => "Wheel step",
+            Key::LblRefreshOnOpen => "Refresh values when opening the flyout",
+            Key::LblName => "Name",
+            Key::HintAlias => "Leave empty to use {}",
+            Key::LblBadge => "Badge",
+            Key::LblShowInTray => "Show in tray",
+            Key::LblLimits => "Brightness limits",
+            Key::LblWriteInterval => "DDC write interval",
+            Key::LblConfigFile => "Configuration file",
+            Key::BtnOpenConfig => "Open config file",
+            Key::StateHidden => "Hidden",
+            Key::StateNotControllable => "Not controllable",
+            Key::StateBuiltInOff => "Built-in display (control off)",
         },
         Lang::It => match key {
             Key::AppName => "Nitor",
@@ -150,6 +247,8 @@ pub fn tr(lang: Lang, key: Key) -> &'static str {
             Key::UpdateFailed => "Aggiornamento non riuscito: {}",
             Key::Updated => "Aggiornato a {}",
             Key::Unresponsive => "non risponde",
+            Key::InternalNoResponse => "lo schermo integrato non ha risposto",
+            Key::BuiltInDisplay => "Schermo integrato",
             Key::ReadOnly => "sola lettura",
             Key::ReadOnlyHint => {
                 "Un preset del monitor (modalità gioco, HDR o impostazioni colore del driver) blocca la luminosità. Cambia il preset sul monitor per controllarla."
@@ -170,6 +269,32 @@ pub fn tr(lang: Lang, key: Key) -> &'static str {
             }
             Key::Brightness => "Luminosità",
             Key::LinkAll => "Collega tutti",
+            Key::SettingsTitle => "Nitor — Impostazioni",
+            Key::SecGeneral => "Generali",
+            Key::SecTray => "Area di notifica",
+            Key::SecMonitors => "Monitor",
+            Key::SecAdvanced => "Avanzate",
+            Key::LblLanguage => "Lingua",
+            Key::LangAuto => "Auto",
+            Key::LblCheckUpdates => "Controlla automaticamente gli aggiornamenti",
+            Key::LblVersion => "Versione {}",
+            Key::BtnCheckNow => "Controlla ora",
+            Key::LblTrayStyle => "Stile dell'icona",
+            Key::StyleNumber => "Numero",
+            Key::StylePill => "Pillola",
+            Key::LblWheelStep => "Passo della rotellina",
+            Key::LblRefreshOnOpen => "Aggiorna i valori all'apertura del pannello",
+            Key::LblName => "Nome",
+            Key::HintAlias => "Lascia vuoto per usare {}",
+            Key::LblBadge => "Badge",
+            Key::LblShowInTray => "Mostra nell'area di notifica",
+            Key::LblLimits => "Limiti di luminosità",
+            Key::LblWriteInterval => "Intervallo di scrittura DDC",
+            Key::LblConfigFile => "File di configurazione",
+            Key::BtnOpenConfig => "Apri file di configurazione",
+            Key::StateHidden => "Nascosto",
+            Key::StateNotControllable => "Non controllabile",
+            Key::StateBuiltInOff => "Schermo integrato (controllo disattivato)",
         },
     }
 }
@@ -196,6 +321,8 @@ mod tests {
             Key::UpToDate,
             Key::UpdateFailed,
             Key::Updated,
+            Key::LblVersion,
+            Key::HintAlias,
         ];
         for lang in [Lang::En, Lang::It] {
             for key in templates {

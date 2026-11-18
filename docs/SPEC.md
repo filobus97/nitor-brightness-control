@@ -176,6 +176,7 @@ The wheel step is fixed by Nitor's setting, independent of the Windows "lines pe
 | `src/win/ddc.rs` | One worker thread per physical monitor with a coalescing command slot |
 | `src/win/wheel.rs` | Temporary low-level mouse hook (§9) |
 | `src/win/icon.rs`, `theme.rs` | Direct2D → HICON rendering; taskbar/app theme |
+| `src/win/flyout.rs`, `settings.rs` | Direct2D flyout and the Settings window (one thread-local state each; actions go to `app.rs` through a callback) |
 | `src/win/tray.rs` | `Shell_NotifyIcon` wrappers |
 | `src/win/instance.rs` | Single instance + argument forwarding |
 | `src/win/autostart.rs` | `HKCU\...\Run` entry |
@@ -236,7 +237,7 @@ The shell never forwards `WM_MOUSEWHEEL` to a tray icon's callback window.
 ## 10. Configuration and portability
 
 - **Config location**: `--config <path>`; else `Nitor.ini` next to the exe if that folder is writable; else `%APPDATA%\Nitor\Nitor.ini`.
-- **Settings**: the "Settings" menu item opens `Nitor.ini` in the default editor; Nitor reloads it when the file changes. A graphical settings page is not planned; common settings are reachable from the flyout and tray menu.
+- **Settings**: the "Settings" menu item and the flyout's gear open a graphical Settings window (`src/win/settings.rs`): a normal top-level window in the Windows 11 Settings style (Mica backdrop, grouped cards, light/dark, per-monitor DPI, scrolls when taller than the screen). Sections: General (start with Windows, language, built-in display, update checks), Tray (icon style, wheel step, refresh on open), Monitors (per monitor: color, name, badge, show in tray, brightness limits, order), Advanced (DDC write interval, open `Nitor.ini`). Changes apply immediately and are saved atomically; there is no OK/Cancel. `Nitor.ini` stays the source of truth for power users and holds the options without a screen (hotkeys, schedule); Nitor reloads it on Rescan.
 - **Tray icon identity**: by `uID`, never GUID (GUID icons are bound to the exe path, which breaks portability).
 - **Autostart**: `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, written only when enabled; a stale path is fixed on launch.
 - **Single instance**: named mutex; a second launch forwards its arguments via `WM_COPYDATA` and exits.
