@@ -2,6 +2,7 @@
 //! - `app`: UI thread, message window, glue between everything below.
 //! - `monitors` + `ddc`: discovery, identity, DDC/CI worker threads.
 //! - `icon` + `theme`: tray icon rendering and taskbar/app theme.
+//! - `update`: WinHTTP release check and self-update.
 //! - `tray`, `wheel`, `instance`, `autostart`, `util`: small Win32 wrappers.
 
 pub mod app;
@@ -13,6 +14,7 @@ pub mod instance;
 pub mod monitors;
 pub mod theme;
 pub mod tray;
+pub mod update;
 pub mod util;
 pub mod wheel;
 pub mod wmi;
@@ -29,7 +31,13 @@ use windows::core::PCWSTR;
 /// Process entry point: parse CLI, attach the parent console for output,
 /// forward to a running instance or run standalone `list`/`get`, otherwise run the app.
 pub fn main() -> i32 {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    let after_update = take_after_update(&mut args);
+    if let Some(pid) = after_update {
+        // Our predecessor holds the single-instance mutex until it exits.
+        update::wait_for_exit(pid);
+    }
+    update::remove_old_exe();
     if !args.is_empty() {
         util::attach_parent_console();
     }
@@ -58,8 +66,18 @@ pub fn main() -> i32 {
     match instance::acquire() {
         Instance::Secondary(hwnd) => forward_to_primary(hwnd, &args),
         // The guard keeps the single-instance mutex until the process exits.
-        Instance::Primary(_guard) => run_primary(config_path, inv.commands),
+        Instance::Primary(_guard) => run_primary(config_path, inv.commands, after_update.is_some()),
     }
+}
+
+/// Remove `--after-update <pid>` (added by the previous version when it restarts into an
+/// update) from `args`; the pid of that process.
+fn take_after_update(args: &mut Vec<String>) -> Option<u32> {
+    let i = args.iter().position(|a| a == "--after-update")?;
+    let end = (i + 2).min(args.len());
+    let pid = args.get(i + 1).and_then(|p| p.parse().ok());
+    args.drain(i..end);
+    pid
 }
 
 /// A second launch: hand the command line to the running instance and relay its answer.
@@ -102,7 +120,7 @@ fn wait_for_primary_window() -> HWND {
 }
 
 /// No other instance runs (we hold the mutex): decide between standalone and the tray app.
-fn run_primary(config_path: PathBuf, commands: Vec<Command>) -> i32 {
+fn run_primary(config_path: PathBuf, commands: Vec<Command>, updated: bool) -> i32 {
     let is_query = |c: &Command| matches!(c, Command::List | Command::Get(_));
     if !commands.is_empty() && commands.iter().all(is_query) {
         return app::standalone(&config_path, &commands);
@@ -115,5 +133,5 @@ fn run_primary(config_path: PathBuf, commands: Vec<Command>) -> i32 {
         .into_iter()
         .filter(|c| !matches!(c, Command::Quit | Command::Rescan))
         .collect();
-    app::run(config_path, initial)
+    app::run(config_path, initial, updated)
 }

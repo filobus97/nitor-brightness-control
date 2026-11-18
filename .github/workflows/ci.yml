@@ -80,6 +80,6 @@ jobs:
           cd dist
           sha256sum *.exe > SHA256SUMS.txt
           prerelease=""
-          case "$GITHUB_REF_NAME" in v0.*|*-*) prerelease="--prerelease" ;; esac
+          case "$GITHUB_REF_NAME" in *-*) prerelease="--prerelease" ;; esac
           gh release create "$GITHUB_REF_NAME" *.exe SHA256SUMS.txt \
             --repo "$GITHUB_REPOSITORY" --title "Nitor $GITHUB_REF_NAME" --generate-notes $prerelease

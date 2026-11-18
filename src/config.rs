@@ -31,6 +31,10 @@ pub struct General {
     pub language: String,
     /// Set once the first-run pinning hint was shown.
     pub hint_shown: bool,
+    /// Check GitHub Releases for a newer version (at startup, then every 24 h).
+    pub check_updates: bool,
+    /// Unix seconds of the last automatic update check.
+    pub last_update_check: u64,
     /// Stable IDs being probed; non-empty at startup means the last probe crashed (§7.4).
     pub detection_in_progress: Vec<String>,
 }
@@ -50,6 +54,8 @@ impl Default for General {
             internal_display: false,
             language: "auto".into(),
             hint_shown: false,
+            check_updates: true,
+            last_update_check: 0,
             detection_in_progress: Vec::new(),
         }
     }
@@ -210,6 +216,8 @@ impl Config {
             one_line(&g.language)
         );
         o += &format!("hint_shown = {}\n", g.hint_shown);
+        o += &format!("check_updates = {}\n", g.check_updates);
+        o += &format!("last_update_check = {}\n", g.last_update_check);
         o += &format!(
             "detection_in_progress = {}\n",
             one_line(&g.detection_in_progress.join(","))
@@ -313,6 +321,8 @@ impl General {
                 }
             }
             "hint_shown" => self.hint_shown = parse_bool(v, d.hint_shown),
+            "check_updates" => self.check_updates = parse_bool(v, d.check_updates),
+            "last_update_check" => self.last_update_check = parse_num(v).unwrap_or(0),
             "detection_in_progress" => {
                 self.detection_in_progress = v
                     .split(',')
@@ -389,6 +399,8 @@ mod tests {
         c.general.refresh_on_open = false;
         c.general.write_interval_ms = 150;
         c.general.language = "it".into();
+        c.general.check_updates = false;
+        c.general.last_update_check = 1_700_000_000;
         c.general.detection_in_progress = vec!["DEL41D9-ABC#1".into(), "A&B-2".into()];
         c.monitors.insert(
             "DEL41D9-ABC123".into(),

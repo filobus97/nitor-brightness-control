@@ -81,7 +81,16 @@ pub fn attach_parent_console() -> bool {
 
 /// Open a file with its default application (`ShellExecuteW` "open").
 pub fn open_with_default_app(path: &Path) {
-    let file = wide(&path.to_string_lossy());
+    shell_open(&path.to_string_lossy());
+}
+
+/// Open a web page in the default browser.
+pub fn open_url(url: &str) {
+    shell_open(url);
+}
+
+fn shell_open(target: &str) {
+    let file = wide(target);
     let verb = wide("open");
     // SAFETY: both strings are NUL-terminated and outlive the call.
     unsafe {

@@ -13,20 +13,22 @@ use super::instance::{self, WINDOW_CLASS};
 use super::monitors::{self, FoundMonitor};
 use super::theme::Theme;
 use super::tray::{self, TrayEvent, WM_APP_TRAY};
+use super::update::{self as updater, InstallError};
 use super::wheel::{self, WM_APP_WHEEL, WheelEvent};
 use super::wmi::Wmi;
 use super::{autostart, util};
 use crate::cli::{self, BrightnessOp, Command, Target};
 use crate::color::{Rgb, next_palette_color};
 use crate::config::{Config, MonitorSettings};
-use crate::i18n::{Key, Lang, tr};
+use crate::i18n::{Key, Lang, tr, tr_with};
 use crate::link::link_value;
+use crate::update::{self, Release};
 use std::cell::RefCell;
 use std::ffi::c_void;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use windows::Win32::Foundation::{HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::Graphics::Gdi::{HMONITOR, MONITOR_DEFAULTTONEAREST, MonitorFromPoint};
 use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
@@ -53,11 +55,16 @@ use windows::core::{PCWSTR, w};
 
 /// Posted by DDC workers when events are waiting in `App::queue`.
 const WM_APP_DDC: u32 = WM_APP + 3;
+/// Posted by update threads when events are waiting in `App::update_queue`.
+const WM_APP_UPDATE: u32 = WM_APP + 4;
 /// `NIN_SELECT | NINF_KEY`: select via keyboard.
 const NIN_KEYSELECT: u32 = NIN_SELECT | NINF_KEY;
 
 const TIMER_WHEEL: usize = 1;
 const TIMER_RESCAN: usize = 2;
+/// Hourly: start an automatic update check if 24 h passed (survives sleep).
+const TIMER_UPDATE: usize = 3;
+const UPDATE_POLL_MS: u32 = 60 * 60 * 1000;
 const WHEEL_POLL_MS: u32 = 100;
 /// Brightness notifications this soon after Nitor's own change are treated as echoes.
 const OWN_CHANGE_WINDOW: Duration = Duration::from_secs(1);
@@ -73,6 +80,8 @@ const ID_SETTINGS: u32 = 2;
 const ID_AUTOSTART: u32 = 3;
 const ID_EXIT: u32 = 4;
 const ID_INTERNAL: u32 = 5;
+const ID_CHECK_UPDATES: u32 = 6;
+const ID_UPDATE: u32 = 7;
 
 /// Registered `TaskbarCreated` message (0 until registered).
 static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
@@ -278,6 +287,23 @@ fn pick_lang(config: &Config) -> Lang {
         .unwrap_or_else(|| Lang::from_locale(&util::ui_locale()))
 }
 
+/// The result of an update thread.
+enum UpdateEvent {
+    /// `manual`: the user asked, so every outcome is reported.
+    Checked {
+        manual: bool,
+        result: Result<Release, String>,
+    },
+    /// The new exe is in place; the path to start it from.
+    Installed(Result<PathBuf, InstallError>),
+}
+
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
 // ---------------------------------------------------------------------------
 // App state
 // ---------------------------------------------------------------------------
@@ -333,9 +359,17 @@ struct App {
     probe_done: bool,
     display_off: bool,
     /// Shown once the first probe completes (needs a tray icon).
-    balloons: Vec<(&'static str, &'static str)>,
+    balloons: Vec<(String, String)>,
     /// CLI commands to apply after the first probe.
     initial: Vec<Command>,
+    /// Events from update threads, drained on `WM_APP_UPDATE`.
+    update_queue: Arc<Mutex<Vec<UpdateEvent>>>,
+    /// A check or install thread is running.
+    update_busy: bool,
+    /// A newer release than the running version, if one was found.
+    available: Option<Release>,
+    /// The version last announced by balloon (once per version and session).
+    announced: Option<String>,
 }
 
 thread_local! {
@@ -362,16 +396,24 @@ impl App {
         mut config: Config,
         renderer: IconRenderer,
         initial: Vec<Command>,
+        updated: bool,
     ) -> App {
         let lang = pick_lang(&config);
+        let app_name = || tr(lang, Key::AppName).to_string();
         let mut balloons = Vec::new();
+        if updated {
+            balloons.push((
+                app_name(),
+                tr_with(lang, Key::Updated, update::current_version()),
+            ));
+        }
         if autostart::fix_stale() {
-            balloons.push((tr(lang, Key::AppName), tr(lang, Key::AutostartFixed)));
+            balloons.push((app_name(), tr(lang, Key::AutostartFixed).to_string()));
         }
         config.general.autostart = autostart::is_enabled();
         let safe_skip = std::mem::take(&mut config.general.detection_in_progress);
         if !safe_skip.is_empty() {
-            balloons.push((tr(lang, Key::AppName), tr(lang, Key::SafeModeText)));
+            balloons.push((app_name(), tr(lang, Key::SafeModeText).to_string()));
         }
         App {
             hwnd,
@@ -390,6 +432,10 @@ impl App {
             display_off: false,
             balloons,
             initial,
+            update_queue: Arc::default(),
+            update_busy: false,
+            available: None,
+            announced: None,
         }
     }
 
@@ -534,25 +580,148 @@ impl App {
         if !self.config.general.hint_shown {
             self.config.general.hint_shown = true;
             self.balloons.push((
-                tr(self.lang, Key::FirstRunTitle),
-                tr(self.lang, Key::FirstRunText),
+                tr(self.lang, Key::FirstRunTitle).to_string(),
+                tr(self.lang, Key::FirstRunText).to_string(),
             ));
         }
         self.save();
 
-        let uid = self
-            .monitors
+        if let Some(uid) = self.balloon_uid() {
+            for (title, text) in self.balloons.drain(..) {
+                tray::balloon(self.hwnd, uid, &title, &text);
+            }
+        }
+        self.maybe_auto_check();
+        for cmd in std::mem::take(&mut self.initial) {
+            self.exec(&cmd);
+        }
+    }
+
+    /// The tray icon a balloon can be attached to (none before the first icon exists).
+    fn balloon_uid(&self) -> Option<u32> {
+        self.monitors
             .iter()
             .find(|m| m.icon.is_some())
             .map(|m| m.uid)
-            .or(self.placeholder.is_some().then_some(PLACEHOLDER_UID));
-        if let Some(uid) = uid {
-            for (title, text) in self.balloons.drain(..) {
-                tray::balloon(self.hwnd, uid, title, text);
+            .or(self.placeholder.is_some().then_some(PLACEHOLDER_UID))
+    }
+
+    fn balloon(&self, text: &str) {
+        if let Some(uid) = self.balloon_uid() {
+            tray::balloon(self.hwnd, uid, tr(self.lang, Key::AppName), text);
+        }
+    }
+
+    // --- updates ----------------------------------------------------------
+
+    /// Run `job` on a thread and deliver its event to the UI thread.
+    fn spawn_update_job(&mut self, job: impl FnOnce() -> UpdateEvent + Send + 'static) {
+        self.update_busy = true;
+        let queue = self.update_queue.clone();
+        // HWND is not Send; carry it as an integer.
+        let hwnd = self.hwnd.0 as isize;
+        std::thread::spawn(move || {
+            let event = job();
+            lock(&queue).push(event);
+            // SAFETY: posting to a window handle is safe even if the window is gone.
+            unsafe {
+                let _ = PostMessageW(
+                    Some(HWND(hwnd as *mut c_void)),
+                    WM_APP_UPDATE,
+                    WPARAM(0),
+                    LPARAM(0),
+                );
+            }
+        });
+    }
+
+    fn start_check(&mut self, manual: bool) {
+        if self.update_busy {
+            return;
+        }
+        self.spawn_update_job(move || UpdateEvent::Checked {
+            manual,
+            result: updater::check(),
+        });
+    }
+
+    /// Start a quiet check if enabled and 24 h passed since the last one.
+    fn maybe_auto_check(&mut self) {
+        let last = self.config.general.last_update_check;
+        let now = now_secs();
+        if !self.probe_done
+            || !self.config.general.check_updates
+            || self.update_busy
+            || !update::check_due(last, now)
+        {
+            return;
+        }
+        // Recorded when started, so a failing check is not retried every hour.
+        self.config.general.last_update_check = now;
+        self.save();
+        self.start_check(false);
+    }
+
+    fn install_update(&mut self) {
+        let Some(release) = self.available.clone() else {
+            return;
+        };
+        if self.update_busy {
+            return;
+        }
+        self.spawn_update_job(move || UpdateEvent::Installed(updater::install(&release)));
+    }
+
+    fn on_update(&mut self) {
+        let events = std::mem::take(&mut *lock(&self.update_queue));
+        for event in events {
+            self.update_busy = false;
+            match event {
+                UpdateEvent::Checked { manual, result } => self.on_checked(manual, result),
+                UpdateEvent::Installed(result) => self.on_installed(result),
             }
         }
-        for cmd in std::mem::take(&mut self.initial) {
-            self.exec(&cmd);
+    }
+
+    fn on_checked(&mut self, manual: bool, result: Result<Release, String>) {
+        match result {
+            Ok(release) if update::is_newer(update::current_version(), release.version()) => {
+                let version = release.version().to_string();
+                if manual || self.announced.as_deref() != Some(&version) {
+                    self.balloon(&tr_with(self.lang, Key::UpdateAvailable, &version));
+                    self.announced = Some(version);
+                }
+                self.available = Some(release);
+            }
+            Ok(_) => {
+                self.available = None;
+                if manual {
+                    let text = tr_with(self.lang, Key::UpToDate, update::current_version());
+                    self.balloon(&text);
+                }
+            }
+            // Automatic checks fail silently (offline, rate limit).
+            Err(e) if manual => self.balloon(&tr_with(self.lang, Key::UpdateFailed, &e)),
+            Err(_) => {}
+        }
+    }
+
+    fn on_installed(&mut self, result: Result<PathBuf, InstallError>) {
+        let error = match result {
+            Ok(exe) => match updater::restart(&exe) {
+                // The new exe waits for this process to exit; close like Exit does.
+                Ok(()) => return self.on_menu(ID_EXIT),
+                Err(e) => e,
+            },
+            Err(InstallError::NotWritable) => String::new(),
+            Err(InstallError::Failed(e)) => e,
+        };
+        if !error.is_empty() {
+            self.balloon(&tr_with(self.lang, Key::UpdateFailed, &error));
+        }
+        // Nothing (more) to do automatically: offer the manual download.
+        if let Some(release) = &self.available {
+            util::open_url(&release.page);
         }
     }
 
@@ -722,6 +891,7 @@ impl App {
                 }
             }
             TIMER_RESCAN => self.rescan(),
+            TIMER_UPDATE => self.maybe_auto_check(),
             _ => {}
         }
     }
@@ -902,6 +1072,8 @@ impl App {
                 self.save();
                 self.scan();
             }
+            ID_CHECK_UPDATES => self.start_check(true),
+            ID_UPDATE => self.install_update(),
             ID_AUTOSTART => {
                 let _ = autostart::set(!autostart::is_enabled());
                 self.config.general.autostart = autostart::is_enabled();
@@ -1065,53 +1237,76 @@ fn on_tray(hwnd: HWND, ev: TrayEvent) {
             with_app(|a| a.toggle_flyout(POINT { x: ev.x, y: ev.y }));
         }
         WM_CONTEXTMENU => {
-            let Some((lang, internal)) = with_app(|a| {
+            let Some((lang, internal, update_to)) = with_app(|a| {
                 // Offer the built-in toggle only if the last scan found such a panel.
                 let found = a.monitors.iter().any(|m| m.row.internal);
-                (a.lang, found.then_some(a.config.general.internal_display))
+                (
+                    a.lang,
+                    found.then_some(a.config.general.internal_display),
+                    a.available.as_ref().map(|r| r.version().to_string()),
+                )
             }) else {
                 return;
             };
             // The menu runs a nested message loop: the app must not be borrowed meanwhile.
-            let cmd = show_menu(hwnd, ev.x, ev.y, lang, autostart::is_enabled(), internal);
+            let menu = MenuState {
+                lang,
+                autostart: autostart::is_enabled(),
+                internal,
+                update_to,
+            };
+            let cmd = show_menu(hwnd, ev.x, ev.y, &menu);
             with_app(|a| a.on_menu(cmd));
         }
         _ => {}
     }
 }
 
-/// Show the tray context menu at a screen point and return the chosen command id (0: none).
-/// `internal` is `Some(checked)` when the "built-in display" item should be shown.
-fn show_menu(
-    hwnd: HWND,
-    x: i32,
-    y: i32,
+/// What the tray context menu shows.
+struct MenuState {
     lang: Lang,
-    autostart_on: bool,
+    autostart: bool,
+    /// `Some(checked)` when the "built-in display" item should be shown.
     internal: Option<bool>,
-) -> u32 {
+    /// Version offered by the "Update to" item, if a newer release is known.
+    update_to: Option<String>,
+}
+
+/// Show the tray context menu at a screen point and return the chosen command id (0: none).
+fn show_menu(hwnd: HWND, x: i32, y: i32, state: &MenuState) -> u32 {
+    let lang = state.lang;
     // SAFETY: standard menu calls on a menu we create and destroy here; every text buffer
     // outlives the AppendMenuW call that copies it.
     unsafe {
         let Ok(menu) = CreatePopupMenu() else {
             return 0;
         };
-        let add = |flags: MENU_ITEM_FLAGS, id: u32, key: Key| {
-            let text = util::wide(tr(lang, key));
+        let add_text = |flags: MENU_ITEM_FLAGS, id: u32, text: &str| {
+            let text = util::wide(text);
             let _ = AppendMenuW(menu, MF_STRING | flags, id as usize, PCWSTR(text.as_ptr()));
         };
+        let add = |flags: MENU_ITEM_FLAGS, id: u32, key: Key| add_text(flags, id, tr(lang, key));
         add(MENU_ITEM_FLAGS(0), ID_RESCAN, Key::MenuRescan);
         add(MENU_ITEM_FLAGS(0), ID_SETTINGS, Key::MenuSettings);
-        let checked = if autostart_on {
+        let checked = if state.autostart {
             MF_CHECKED
         } else {
             MENU_ITEM_FLAGS(0)
         };
         add(checked, ID_AUTOSTART, Key::MenuStartWithWindows);
-        if let Some(on) = internal {
+        if let Some(on) = state.internal {
             let checked = if on { MF_CHECKED } else { MENU_ITEM_FLAGS(0) };
             add(checked, ID_INTERNAL, Key::MenuInternalDisplay);
         }
+        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+        if let Some(v) = &state.update_to {
+            add_text(
+                MENU_ITEM_FLAGS(0),
+                ID_UPDATE,
+                &tr_with(lang, Key::MenuUpdateTo, v),
+            );
+        }
+        add(MENU_ITEM_FLAGS(0), ID_CHECK_UPDATES, Key::MenuCheckUpdates);
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         add(MENU_ITEM_FLAGS(0), ID_EXIT, Key::MenuExit);
 
@@ -1199,6 +1394,9 @@ unsafe extern "system" fn wnd_proc(
         WM_APP_DDC => {
             with_app(App::on_ddc);
         }
+        WM_APP_UPDATE => {
+            with_app(App::on_update);
+        }
         WM_TIMER => {
             with_app(|a| a.on_timer(wparam.0));
         }
@@ -1275,8 +1473,8 @@ fn create_window() -> Option<HWND> {
 // ---------------------------------------------------------------------------
 
 /// Run the tray app until Exit/`quit`. `initial` are CLI commands to apply once
-/// monitors are known. Returns the process exit code.
-pub fn run(config_path: PathBuf, initial: Vec<Command>) -> i32 {
+/// monitors are known; `updated`: this start follows a self-update. Returns the process exit code.
+pub fn run(config_path: PathBuf, initial: Vec<Command>, updated: bool) -> i32 {
     // SAFETY: process-wide setup on the UI thread before any window exists. DPI failure
     // is fine (the manifest sets it too).
     unsafe {
@@ -1305,9 +1503,13 @@ pub fn run(config_path: PathBuf, initial: Vec<Command>) -> i32 {
         );
     }
 
-    let app = App::new(hwnd, config_path, config, renderer, initial);
+    let app = App::new(hwnd, config_path, config, renderer, initial, updated);
     APP.with(|cell| *cell.borrow_mut() = Some(app));
     with_app(App::scan);
+    // SAFETY: plain timer call on our own window.
+    unsafe {
+        SetTimer(Some(hwnd), TIMER_UPDATE, UPDATE_POLL_MS, None);
+    }
 
     let mut msg = MSG::default();
     // SAFETY: standard message loop; `msg` is a valid out-pointer.
