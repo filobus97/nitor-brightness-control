@@ -17,7 +17,7 @@ use super::util;
 use crate::color::{PALETTE, Rgb};
 use crate::i18n::{Key, Lang, tr};
 use crate::link::link_master;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
@@ -43,9 +43,9 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     VK_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, GetClientRect, HWND_TOPMOST, IDC_ARROW, LoadCursorW,
-    RegisterClassExW, SW_HIDE, SWP_NOACTIVATE, SWP_NOZORDER, SWP_SHOWWINDOW, SetForegroundWindow,
-    SetWindowPos, ShowWindow, WA_INACTIVE, WM_ACTIVATE, WM_CAPTURECHANGED, WM_DPICHANGED,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, HWND_TOPMOST, IDC_ARROW,
+    LoadCursorW, RegisterClassExW, SWP_NOACTIVATE, SWP_NOZORDER, SWP_SHOWWINDOW,
+    SetForegroundWindow, SetWindowPos, WA_INACTIVE, WM_ACTIVATE, WM_CAPTURECHANGED, WM_DPICHANGED,
     WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT,
     WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
@@ -86,26 +86,44 @@ pub enum Action {
 
 static ON_ACTION: OnceLock<fn(Action)> = OnceLock::new();
 
-/// Create the (hidden) flyout window. Once, on the UI thread, with COM initialized.
+/// Register the window class. Once, on the UI thread. The window itself, and every
+/// Direct2D/DirectWrite object behind it, only exists while the flyout is open.
 pub fn init(on_action: fn(Action)) {
     let _ = ON_ACTION.set(on_action);
-    if let Some(state) = State::create() {
-        STATE.with(|s| *s.borrow_mut() = Some(state));
+    // SAFETY: plain class registration; the class name is copied by the call.
+    unsafe {
+        let Ok(module) = GetModuleHandleW(None) else {
+            return;
+        };
+        let class = class_name();
+        let wc = WNDCLASSEXW {
+            cbSize: size_of::<WNDCLASSEXW>() as u32,
+            lpfnWndProc: Some(wnd_proc),
+            hInstance: HINSTANCE(module.0),
+            hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
+            lpszClassName: PCWSTR(class.as_ptr()),
+            ..Default::default()
+        };
+        RegisterClassExW(&wc);
     }
+}
+
+fn class_name() -> Vec<u16> {
+    util::wide("NitorFlyout")
 }
 
 /// Open the flyout near `anchor` (screen coordinates of the clicked tray icon).
 pub fn show(anchor: POINT, rows: Vec<FlyoutRow>, linked: bool, lang: Lang) {
     // A click on the tray icon first deactivates (closes) the flyout, then arrives here: ignore it.
-    let opened = with_state(|st| {
-        if st.visible || st.closed_at.is_some_and(|t| t.elapsed() < REOPEN_GUARD) {
-            return None;
-        }
-        st.open(anchor, rows, linked, lang);
-        Some(st.hwnd)
-    })
-    .flatten();
-    let Some(hwnd) = opened else { return };
+    if is_visible() || CLOSED_AT.get().is_some_and(|t| t.elapsed() < REOPEN_GUARD) {
+        return;
+    }
+    let Some(mut st) = State::create() else {
+        return;
+    };
+    st.open(anchor, rows, linked, lang);
+    let hwnd = st.hwnd;
+    STATE.with(|s| *s.borrow_mut() = Some(st));
     let (x, y, w, h) = sync_geometry().unwrap_or_default();
     // SAFETY: plain window calls on our own window; the state borrow is released.
     unsafe {
@@ -117,19 +135,18 @@ pub fn show(anchor: POINT, rows: Vec<FlyoutRow>, linked: bool, lang: Lang) {
 
 /// New values/colors while open. Does not disturb a drag in progress.
 pub fn update(rows: Vec<FlyoutRow>) {
-    if with_state(|st| st.visible && st.merge(rows)) == Some(true) {
+    if with_state(|st| st.merge(rows)) == Some(true) {
         refresh_window();
     }
 }
 
 /// The system theme changed: re-read it and restyle (also while open).
 pub fn retheme() {
-    let visible = with_state(|st| {
+    let open = with_state(|st| {
         st.theme = Theme::read();
         st.apply_theme();
-        st.visible
     });
-    if visible == Some(true) {
+    if open.is_some() {
         refresh_window();
     }
 }
@@ -138,8 +155,9 @@ pub fn hide() {
     close();
 }
 
+/// The flyout exists exactly while it is open (a borrowed state counts as open).
 pub fn is_visible() -> bool {
-    with_state(|st| st.visible).unwrap_or(false)
+    STATE.with(|s| !matches!(s.try_borrow(), Ok(s) if s.is_none()))
 }
 
 // ---------------------------------------------------------------------------
@@ -414,8 +432,6 @@ struct State {
     fonts: Option<(u32, Fonts)>,
     target: Option<Target>,
 
-    visible: bool,
-    closed_at: Option<Instant>,
     rows: Vec<FlyoutRow>,
     linked: bool,
     lang: Lang,
@@ -439,6 +455,8 @@ struct State {
 
 thread_local! {
     static STATE: RefCell<Option<State>> = const { RefCell::new(None) };
+    /// When the flyout last closed; outside `State`, which is destroyed on close.
+    static CLOSED_AT: Cell<Option<Instant>> = const { Cell::new(None) };
 }
 
 /// Run `f` on the state, unless it does not exist or is borrowed (re-entrant message).
@@ -613,7 +631,6 @@ impl State {
     // --- opening and updating --------------------------------------------
 
     fn open(&mut self, anchor: POINT, rows: Vec<FlyoutRow>, linked: bool, lang: Lang) {
-        self.theme = Theme::read();
         self.rows = rows;
         self.linked = linked;
         self.lang = lang;
@@ -625,7 +642,6 @@ impl State {
         self.recompute_master();
         self.focus = focusable(&self.rows, linked).first().copied();
         self.focus_visible = false;
-        self.visible = true;
 
         // SAFETY: plain monitor queries with valid out-pointers.
         let (dpi, work, center) = unsafe {
@@ -1268,18 +1284,7 @@ impl State {
                 D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None).ok()?;
             let dwrite: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED).ok()?;
             let hinst = HINSTANCE(GetModuleHandleW(None).ok()?.0);
-            let class = util::wide("NitorFlyout");
-            let wc = WNDCLASSEXW {
-                cbSize: size_of::<WNDCLASSEXW>() as u32,
-                lpfnWndProc: Some(wnd_proc),
-                hInstance: hinst,
-                hCursor: LoadCursorW(None, IDC_ARROW).ok()?,
-                lpszClassName: PCWSTR(class.as_ptr()),
-                ..Default::default()
-            };
-            if RegisterClassExW(&wc) == 0 {
-                return None;
-            }
+            let class = class_name();
             let hwnd = CreateWindowExW(
                 WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
                 PCWSTR(class.as_ptr()),
@@ -1337,8 +1342,6 @@ impl State {
                 acrylic,
                 fonts: None,
                 target: None,
-                visible: false,
-                closed_at: None,
                 rows: Vec::new(),
                 linked: false,
                 lang: Lang::default(),
@@ -1365,20 +1368,26 @@ pub fn master() -> u8 {
     with_state(|st| st.master).unwrap_or(0)
 }
 
-/// Close (idempotent) and remember when, so the tray click that caused it doesn't reopen.
+/// Close (idempotent): destroy the window and release all Direct2D/DirectWrite objects,
+/// and remember when, so the tray click that caused it doesn't reopen.
 fn close() {
-    let hwnd = with_state(|st| {
-        let was = st.visible;
-        st.visible = false;
-        st.drag = None;
-        st.closed_at = Some(Instant::now());
-        was.then_some(st.hwnd)
-    })
-    .flatten();
-    if let Some(hwnd) = hwnd {
-        // SAFETY: our own window; the borrow is released because this sends WM_ACTIVATE.
+    let state = STATE.with(|s| s.try_borrow_mut().ok().and_then(|mut s| s.take()));
+    if let Some(st) = state {
+        CLOSED_AT.set(Some(Instant::now()));
+        // The state is already out of `STATE`, so the messages this sends find nothing.
+        drop(st);
+        util::trim_working_set();
+    }
+}
+
+impl Drop for State {
+    fn drop(&mut self) {
+        // Release the render target before its window goes away.
+        self.target = None;
+        self.fonts = None;
+        // SAFETY: our own window, destroyed once on the thread that created it.
         unsafe {
-            let _ = ShowWindow(hwnd, SW_HIDE);
+            let _ = DestroyWindow(self.hwnd);
         }
     }
 }

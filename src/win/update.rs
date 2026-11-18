@@ -173,7 +173,8 @@ fn sibling(exe: &Path, suffix: &str) -> PathBuf {
 /// the rename).
 pub fn install(release: &Release) -> Result<PathBuf, InstallError> {
     let failed = |e: String| InstallError::Failed(e);
-    let asset = update::asset_name();
+    let asset_name = update::asset_name();
+    let asset = asset_name.as_str();
     let url_of = |name: &str| {
         release
             .asset_url(name)

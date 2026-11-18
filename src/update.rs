@@ -17,12 +17,41 @@ pub fn repo_slug() -> &'static str {
     url.strip_prefix("https://github.com/").unwrap_or(url)
 }
 
-/// Release asset holding the exe for the architecture this build targets.
-pub fn asset_name() -> &'static str {
-    if cfg!(target_arch = "aarch64") {
-        "Nitor-arm64.exe"
+/// The edition this build is: `Nitor`, or `NitorPlus` with the `plus` feature.
+/// Release assets are named after it, so the updater stays on the user's edition.
+pub fn edition() -> &'static str {
+    if cfg!(feature = "plus") {
+        "NitorPlus"
     } else {
-        "Nitor-x64.exe"
+        "Nitor"
+    }
+}
+
+/// Release asset holding the exe of this edition for the architecture this build targets.
+pub fn asset_name() -> String {
+    let arch = if cfg!(target_arch = "aarch64") {
+        "arm64"
+    } else {
+        "x64"
+    };
+    format!("{}-{arch}.exe", edition())
+}
+
+/// The version as shown in Settings: `0.2.0`, or `0.2.0 Plus`.
+pub fn version_label() -> String {
+    if cfg!(feature = "plus") {
+        format!("{} Plus", current_version())
+    } else {
+        current_version().to_string()
+    }
+}
+
+/// A window title starting with "Nitor", with the edition in it for Plus.
+pub fn product_title(title: &str) -> String {
+    if cfg!(feature = "plus") {
+        title.replacen("Nitor", "Nitor Plus", 1)
+    } else {
+        title.to_string()
     }
 }
 
@@ -386,6 +415,18 @@ mod tests {
     #[test]
     fn repo_and_asset() {
         assert_eq!(repo_slug(), "filobus97/nitor-brightness-controll");
-        assert!(asset_name().starts_with("Nitor-"));
+        let name = asset_name();
+        assert!(name.starts_with(edition()) && name.ends_with(".exe"));
+        if cfg!(feature = "plus") {
+            assert_eq!(edition(), "NitorPlus");
+            assert!(name.starts_with("NitorPlus-"));
+            assert_eq!(version_label(), format!("{} Plus", current_version()));
+            assert_eq!(product_title("Nitor — Settings"), "Nitor Plus — Settings");
+        } else {
+            assert_eq!(edition(), "Nitor");
+            assert!(name.starts_with("Nitor-"));
+            assert_eq!(version_label(), current_version());
+            assert_eq!(product_title("Nitor — Settings"), "Nitor — Settings");
+        }
     }
 }

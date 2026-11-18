@@ -33,24 +33,28 @@ jobs:
       - name: Format
         run: cargo fmt --check
 
-      - name: Clippy
+      - name: Clippy (Nitor)
         run: cargo clippy --all-targets -- -D warnings
 
-      - name: Test
-        run: cargo test
+      - name: Clippy (all features)
+        run: cargo clippy --all-targets --all-features -- -D warnings
 
-      - name: Build x64
-        run: cargo build --release --target x86_64-pc-windows-msvc
+      - name: Test (all features)
+        run: cargo test --all-features
 
-      - name: Build ARM64
-        run: cargo build --release --target aarch64-pc-windows-msvc
-
-      - name: Collect binaries
+      # Each edition is built for both targets; the Plus exe is copied out before the next
+      # build overwrites Nitor.exe (the binary is called Nitor.exe in both editions).
+      - name: Build
         shell: pwsh
         run: |
           New-Item -ItemType Directory dist | Out-Null
-          Copy-Item target/x86_64-pc-windows-msvc/release/Nitor.exe dist/Nitor-x64.exe
-          Copy-Item target/aarch64-pc-windows-msvc/release/Nitor.exe dist/Nitor-arm64.exe
+          foreach ($e in @(@{ name = 'Nitor'; flags = @() }, @{ name = 'NitorPlus'; flags = @('--features', 'plus') })) {
+            foreach ($t in @(@{ triple = 'x86_64-pc-windows-msvc'; arch = 'x64' }, @{ triple = 'aarch64-pc-windows-msvc'; arch = 'arm64' })) {
+              cargo build --release --target $t.triple @($e.flags)
+              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+              Copy-Item "target/$($t.triple)/release/Nitor.exe" "dist/$($e.name)-$($t.arch).exe"
+            }
+          }
           Get-ChildItem dist | Select-Object Name, Length
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -108,4 +112,4 @@ jobs:
           # Creates the tag on this commit when it doesn't exist yet (manual run).
           gh release create "$TAG" *.exe SHA256SUMS.txt --target "$GITHUB_SHA" \
             --repo "$GITHUB_REPOSITORY" --title "Nitor $TAG" --generate-notes $prerelease \
-            --notes "**Download:** \`Nitor-x64.exe\` for most PCs (Intel/AMD) · \`Nitor-arm64.exe\` for ARM PCs (Snapdragon). Not sure? Settings → System → About → System type."
+            --notes "**Download:** \`Nitor-x64.exe\` for most PCs (Intel/AMD) · \`Nitor-arm64.exe\` for ARM PCs (Snapdragon). Not sure? Settings → System → About → System type. **Nitor** controls brightness; **Nitor Plus** (\`NitorPlus-x64.exe\` / \`NitorPlus-arm64.exe\`) adds automatic brightness and color temperature, coming soon. Updates keep you on the edition you run."

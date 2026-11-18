@@ -180,7 +180,10 @@ The wheel step is fixed by Nitor's setting, independent of the Windows "lines pe
 | `src/win/tray.rs` | `Shell_NotifyIcon` wrappers |
 | `src/win/instance.rs` | Single instance + argument forwarding |
 | `src/win/autostart.rs` | `HKCU\...\Run` entry |
+| `src/auto/`, `src/win/auto/` | Nitor Plus only (Cargo feature `plus`, off by default): automation logic (portable) and its Windows side. Declared with `#[cfg(feature = "plus")]`; the plain build contains none of it |
 | `src/update.rs`, `src/win/update.rs` | Release lookup and self-update: version/JSON/checksum logic (portable) and WinHTTP + CNG + file swap |
+
+**Editions.** One codebase, two builds: **Nitor** (brightness only) and **Nitor Plus** (`--features plus`: Nitor plus automation). The binary is `Nitor.exe` in both; CI publishes them as `Nitor-{x64,arm64}.exe` and `NitorPlus-{x64,arm64}.exe`. `update::edition()` names the edition and the updater picks the `{edition}-{arch}.exe` asset, so an install stays on its edition. CI runs clippy and tests with `--all-features`.
 
 ---
 

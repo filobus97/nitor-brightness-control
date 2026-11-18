@@ -12,6 +12,10 @@ publish = false
 name = "Nitor"
 path = "src/main.rs"
 
+[features]
+# Nitor Plus edition: the automation features (src/auto, src/win/auto). Off by default.
+plus = []
+
 [target.'cfg(windows)'.dependencies]
 # Vector2 for Direct2D calls; same version the `windows` crate uses.
 windows-numerics = "0.3"

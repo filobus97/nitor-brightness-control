@@ -96,9 +96,70 @@ impl Default for MonitorSettings {
     }
 }
 
+/// Where the Plus automation gets the location from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum LocationSource {
+    #[default]
+    Manual,
+    Windows,
+}
+
+/// How long a manual change pauses automation for that monitor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum OverrideMode {
+    #[default]
+    UntilTransition,
+    Minutes,
+}
+
+/// `[auto]` section: Nitor Plus automation. Parsed always, only acted on in Plus builds.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Auto {
+    pub enabled: bool,
+    pub latitude: Option<f64>,
+    pub longitude: Option<f64>,
+    pub location_source: LocationSource,
+    pub day_brightness: u8,
+    pub night_brightness: u8,
+    pub use_sensor: bool,
+    pub weather: bool,
+    pub color_enabled: bool,
+    pub day_kelvin: u32,
+    pub night_kelvin: u32,
+    /// Allow colour temperatures below 4000 K (needs the GdiIcmGammaRange registry value).
+    pub experimental_warm: bool,
+    pub override_mode: OverrideMode,
+    pub override_minutes: u32,
+}
+
+// Coordinates are always finite (rejected otherwise when parsing), so equality is total.
+impl Eq for Auto {}
+
+impl Default for Auto {
+    fn default() -> Self {
+        Auto {
+            enabled: false,
+            latitude: None,
+            longitude: None,
+            location_source: LocationSource::Manual,
+            day_brightness: 80,
+            night_brightness: 30,
+            use_sensor: true,
+            weather: false,
+            color_enabled: false,
+            day_kelvin: 6500,
+            night_kelvin: 4000,
+            experimental_warm: false,
+            override_mode: OverrideMode::UntilTransition,
+            override_minutes: 60,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Config {
     pub general: General,
+    pub auto: Auto,
     pub monitors: BTreeMap<String, MonitorSettings>,
     /// `(hotkey, action)` pairs in file order, unparsed.
     pub hotkeys: Vec<(String, String)>,
@@ -136,13 +197,14 @@ fn one_line(s: &str) -> String {
 enum Section {
     None,
     General,
+    Auto,
     Monitor(String),
     Hotkeys,
     Schedule,
 }
 
 impl Config {
-    /// Parse INI text (sections `[general]`, `[monitor.<id>]`, `[hotkeys]`, `[schedule]`;
+    /// Parse INI text (sections `[general]`, `[auto]`, `[monitor.<id>]`, `[hotkeys]`, `[schedule]`;
     /// `;` and `#` comments, also trailing inline `;` comments).
     pub fn parse(text: &str) -> Config {
         let mut cfg = Config::default();
@@ -156,6 +218,8 @@ impl Config {
                 let name = rest.rfind(']').map_or(rest, |e| &rest[..e]).trim();
                 section = if name.eq_ignore_ascii_case("general") {
                     Section::General
+                } else if name.eq_ignore_ascii_case("auto") {
+                    Section::Auto
                 } else if name.eq_ignore_ascii_case("hotkeys") {
                     Section::Hotkeys
                 } else if name.eq_ignore_ascii_case("schedule") {
@@ -175,6 +239,7 @@ impl Config {
             match &section {
                 Section::None => {}
                 Section::General => cfg.general.set(k, v),
+                Section::Auto => cfg.auto.set(k, v),
                 Section::Monitor(id) => {
                     if let Some(m) = cfg.monitors.get_mut(id) {
                         m.set(k, v);
@@ -222,6 +287,9 @@ impl Config {
             "detection_in_progress = {}\n",
             one_line(&g.detection_in_progress.join(","))
         );
+        if self.auto != Auto::default() {
+            o += &self.auto.to_ini();
+        }
         for (id, m) in &self.monitors {
             o += &format!("\n[monitor.{}]\n", one_line(id));
             if let Some(a) = &m.alias {
@@ -336,6 +404,92 @@ impl General {
     }
 }
 
+fn parse_coord(v: &str, limit: f64) -> Option<f64> {
+    parse_num::<f64>(v)
+        .filter(|x| x.is_finite())
+        .map(|x| x.clamp(-limit, limit))
+}
+
+impl Auto {
+    fn set(&mut self, k: &str, v: &str) {
+        let d = Auto::default();
+        match k.to_ascii_lowercase().as_str() {
+            "enabled" => self.enabled = parse_bool(v, d.enabled),
+            "latitude" => self.latitude = parse_coord(v, 90.0),
+            "longitude" => self.longitude = parse_coord(v, 180.0),
+            "location_source" => {
+                self.location_source = match v.to_ascii_lowercase().as_str() {
+                    "windows" => LocationSource::Windows,
+                    _ => LocationSource::Manual,
+                }
+            }
+            "day_brightness" => {
+                self.day_brightness = parse_num::<u8>(v).unwrap_or(d.day_brightness).min(100)
+            }
+            "night_brightness" => {
+                self.night_brightness = parse_num::<u8>(v).unwrap_or(d.night_brightness).min(100)
+            }
+            "use_sensor" => self.use_sensor = parse_bool(v, d.use_sensor),
+            "weather" => self.weather = parse_bool(v, d.weather),
+            "color_enabled" => self.color_enabled = parse_bool(v, d.color_enabled),
+            "day_kelvin" => {
+                self.day_kelvin = parse_num::<u32>(v)
+                    .unwrap_or(d.day_kelvin)
+                    .clamp(1000, 6500)
+            }
+            "night_kelvin" => {
+                self.night_kelvin = parse_num::<u32>(v)
+                    .unwrap_or(d.night_kelvin)
+                    .clamp(1000, 6500)
+            }
+            "experimental_warm" => self.experimental_warm = parse_bool(v, d.experimental_warm),
+            "override_mode" => {
+                self.override_mode = match v.to_ascii_lowercase().as_str() {
+                    "minutes" => OverrideMode::Minutes,
+                    _ => OverrideMode::UntilTransition,
+                }
+            }
+            "override_minutes" => {
+                self.override_minutes = parse_num::<u32>(v)
+                    .unwrap_or(d.override_minutes)
+                    .clamp(1, 1440)
+            }
+            _ => {}
+        }
+    }
+
+    fn to_ini(&self) -> String {
+        let mut o = String::from("\n[auto]\n");
+        o += &format!("enabled = {}\n", self.enabled);
+        if let Some(v) = self.latitude {
+            o += &format!("latitude = {v}\n");
+        }
+        if let Some(v) = self.longitude {
+            o += &format!("longitude = {v}\n");
+        }
+        let src = match self.location_source {
+            LocationSource::Manual => "manual",
+            LocationSource::Windows => "windows",
+        };
+        o += &format!("location_source = {src}          ; manual | windows\n");
+        o += &format!("day_brightness = {}\n", self.day_brightness);
+        o += &format!("night_brightness = {}\n", self.night_brightness);
+        o += &format!("use_sensor = {}\n", self.use_sensor);
+        o += &format!("weather = {}\n", self.weather);
+        o += &format!("color_enabled = {}\n", self.color_enabled);
+        o += &format!("day_kelvin = {}\n", self.day_kelvin);
+        o += &format!("night_kelvin = {}\n", self.night_kelvin);
+        o += &format!("experimental_warm = {}\n", self.experimental_warm);
+        let mode = match self.override_mode {
+            OverrideMode::UntilTransition => "until_transition",
+            OverrideMode::Minutes => "minutes",
+        };
+        o += &format!("override_mode = {mode}          ; until_transition | minutes\n");
+        o += &format!("override_minutes = {}\n", self.override_minutes);
+        o
+    }
+}
+
 impl MonitorSettings {
     fn set(&mut self, k: &str, v: &str) {
         match k.to_ascii_lowercase().as_str() {
@@ -402,6 +556,22 @@ mod tests {
         c.general.check_updates = false;
         c.general.last_update_check = 1_700_000_000;
         c.general.detection_in_progress = vec!["DEL41D9-ABC#1".into(), "A&B-2".into()];
+        c.auto = Auto {
+            enabled: true,
+            latitude: Some(41.9028),
+            longitude: Some(-12.5),
+            location_source: LocationSource::Windows,
+            day_brightness: 90,
+            night_brightness: 10,
+            use_sensor: false,
+            weather: true,
+            color_enabled: true,
+            day_kelvin: 6000,
+            night_kelvin: 3200,
+            experimental_warm: true,
+            override_mode: OverrideMode::Minutes,
+            override_minutes: 30,
+        };
         c.monitors.insert(
             "DEL41D9-ABC123".into(),
             MonitorSettings {
@@ -466,6 +636,34 @@ mod tests {
         assert_eq!(
             c.schedule,
             vec![("07:00".to_string(), "all b 40".to_string())]
+        );
+    }
+
+    #[test]
+    fn auto_section_only_written_when_non_default() {
+        assert!(!Config::default().to_ini().contains("[auto]"));
+        assert!(sample().to_ini().contains("[auto]"));
+    }
+
+    #[test]
+    fn auto_parsing_is_lenient() {
+        let c = Config::parse(
+            "[auto]\nenabled = yes\nlatitude = 95\nlongitude = abc\nlocation_source = windows\n\
+             day_brightness = 300\nday_kelvin = 100\nnight_kelvin = 99999\noverride_mode = Minutes\n\
+             override_minutes = 0\nunknown = 1\n",
+        );
+        let a = &c.auto;
+        assert!(a.enabled);
+        assert_eq!(a.latitude, Some(90.0));
+        assert_eq!(a.longitude, None);
+        assert_eq!(a.location_source, LocationSource::Windows);
+        assert_eq!(a.day_brightness, 80);
+        assert_eq!((a.day_kelvin, a.night_kelvin), (1000, 6500));
+        assert_eq!(a.override_mode, OverrideMode::Minutes);
+        assert_eq!(a.override_minutes, 1);
+        assert_eq!(
+            Config::parse("[auto]\nlatitude = NaN\n").auto.latitude,
+            None
         );
     }
 

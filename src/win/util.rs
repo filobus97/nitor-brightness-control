@@ -10,9 +10,20 @@ use windows::Win32::Globalization::{
     GetUserDefaultLocaleName, GetUserPreferredUILanguages, MUI_LANGUAGE_NAME,
 };
 use windows::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole};
+use windows::Win32::System::Threading::{GetCurrentProcess, SetProcessWorkingSetSize};
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 use windows::core::{PCWSTR, PWSTR};
+
+/// Ask Windows to trim this process's working set. A tray app sits idle for days, so this
+/// releases the pages touched at startup or by a closed window (they fault back in if
+/// needed); it is not a leak workaround.
+pub fn trim_working_set() {
+    // SAFETY: the pseudo-handle is always valid; (-1, -1) means "empty the working set".
+    unsafe {
+        let _ = SetProcessWorkingSetSize(GetCurrentProcess(), usize::MAX, usize::MAX);
+    }
+}
 
 /// UTF-16, NUL-terminated.
 pub fn wide(s: &str) -> Vec<u16> {

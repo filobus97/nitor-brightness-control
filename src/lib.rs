@@ -4,6 +4,8 @@
 //! so a future sibling project (e.g. a Linux/Wayland front-end) can reuse them.
 //! Everything that touches Win32 lives in [`win`].
 
+#[cfg(feature = "plus")]
+pub mod auto;
 pub mod cli;
 pub mod color;
 pub mod config;
