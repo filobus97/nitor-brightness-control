@@ -6,6 +6,11 @@ on:
     tags: ["v*"]
   pull_request:
   workflow_dispatch:
+    inputs:
+      release:
+        description: "Publish a release tagged v<Cargo.toml version> from this commit"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -55,7 +60,8 @@ jobs:
           if-no-files-found: error
 
   release:
-    if: startsWith(github.ref, 'refs/tags/v')
+    # A pushed v* tag, or "Run workflow" with "release" ticked (on main).
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.release && github.ref == 'refs/heads/main')
     needs: build
     runs-on: ubuntu-latest
     permissions:
@@ -63,10 +69,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Check tag matches Cargo.toml version
+      - name: Release tag from Cargo.toml version
         run: |
-          version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
-          test "v$version" = "$GITHUB_REF_NAME" || { echo "Tag $GITHUB_REF_NAME != Cargo.toml v$version"; exit 1; }
+          tag="v$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
+          if [ "$GITHUB_REF_TYPE" = tag ] && [ "$GITHUB_REF_NAME" != "$tag" ]; then
+            echo "Tag $GITHUB_REF_NAME != Cargo.toml $tag"; exit 1
+          fi
+          echo "TAG=$tag" >> "$GITHUB_ENV"
 
       - uses: actions/download-artifact@v4
         with:
@@ -80,6 +89,7 @@ jobs:
           cd dist
           sha256sum *.exe > SHA256SUMS.txt
           prerelease=""
-          case "$GITHUB_REF_NAME" in *-*) prerelease="--prerelease" ;; esac
-          gh release create "$GITHUB_REF_NAME" *.exe SHA256SUMS.txt \
-            --repo "$GITHUB_REPOSITORY" --title "Nitor $GITHUB_REF_NAME" --generate-notes $prerelease
+          case "$TAG" in *-*) prerelease="--prerelease" ;; esac
+          # Creates the tag on this commit when it doesn't exist yet (manual run).
+          gh release create "$TAG" *.exe SHA256SUMS.txt --target "$GITHUB_SHA" \
+            --repo "$GITHUB_REPOSITORY" --title "Nitor $TAG" --generate-notes $prerelease
