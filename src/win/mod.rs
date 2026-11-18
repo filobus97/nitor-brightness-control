@@ -7,6 +7,7 @@
 pub mod app;
 pub mod autostart;
 pub mod ddc;
+pub mod flyout;
 pub mod icon;
 pub mod instance;
 pub mod monitors;
@@ -14,6 +15,7 @@ pub mod theme;
 pub mod tray;
 pub mod util;
 pub mod wheel;
+pub mod wmi;
 
 use crate::cli::{self, Command};
 use crate::config;

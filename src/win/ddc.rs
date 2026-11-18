@@ -2,10 +2,12 @@
 //! thread only posts requests and receives `DdcEvent`s through `notify`.
 
 use super::monitors::PhysicalHandle;
+use super::wmi::Wmi;
 use crate::throttle::{WriteThrottle, percent_to_raw, raw_to_percent};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 use windows::Win32::Devices::Display::{GetVCPFeatureAndVCPFeatureReply, SetVCPFeature};
+use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DdcEvent {
@@ -42,16 +44,24 @@ fn lock(m: &Mutex<State>) -> MutexGuard<'_, State> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// How a worker talks to its monitor.
+pub enum Backend {
+    /// External monitor over DDC/CI; the worker owns the handle.
+    Ddc(PhysicalHandle),
+    /// Built-in display through WMI (percent scale, max 100).
+    Wmi,
+}
+
 pub struct DdcWorker {
     shared: Shared,
 }
 
 impl DdcWorker {
-    /// Start a worker that owns `handle`. `key` is echoed in every event so the
+    /// Start a worker for `backend`. `key` is echoed in every event so the
     /// UI can ignore events from workers of a previous scan.
     pub fn spawn(
         key: u64,
-        handle: PhysicalHandle,
+        backend: Backend,
         write_interval: Duration,
         notify: Notify,
     ) -> DdcWorker {
@@ -69,7 +79,7 @@ impl DdcWorker {
         let s2 = shared.clone();
         std::thread::Builder::new()
             .name(format!("ddc-{key}"))
-            .spawn(move || run(key, handle, s2, notify))
+            .spawn(move || run(key, backend, s2, notify))
             .expect("spawn ddc thread");
         DdcWorker { shared }
     }
@@ -160,62 +170,93 @@ fn next_action(shared: &Shared) -> Option<Action> {
     }
 }
 
-/// One DDC read of VCP 0x10 with one retry. Returns `(current, max)`.
-fn read_raw(h: &PhysicalHandle) -> Option<(u32, u32)> {
-    for attempt in 0..2 {
-        let (mut cur, mut max) = (0u32, 0u32);
-        // SAFETY: valid physical-monitor handle; out-pointers are valid locals.
-        let ok = unsafe {
-            GetVCPFeatureAndVCPFeatureReply(h.raw(), VCP_BRIGHTNESS, None, &mut cur, Some(&mut max))
-        };
-        if ok != 0 {
-            return Some((cur, max));
-        }
-        if attempt == 0 {
-            std::thread::sleep(RETRY_DELAY);
-        }
-    }
-    None
+/// A monitor's brightness channel: raw values with a maximum.
+enum Panel {
+    Ddc(PhysicalHandle),
+    /// `None`: WMI could not be connected, every operation fails.
+    Wmi(Option<Wmi>),
 }
 
-/// One DDC write of VCP 0x10 with one retry.
-fn write_raw(h: &PhysicalHandle, raw: u32) -> bool {
-    for attempt in 0..2 {
-        // SAFETY: valid physical-monitor handle.
-        if unsafe { SetVCPFeature(h.raw(), VCP_BRIGHTNESS, raw) } != 0 {
-            return true;
-        }
-        if attempt == 0 {
-            std::thread::sleep(RETRY_DELAY);
+impl Panel {
+    /// Build the panel on the worker thread (WMI needs COM initialized there).
+    fn open(backend: Backend) -> Panel {
+        match backend {
+            Backend::Ddc(h) => Panel::Ddc(h),
+            Backend::Wmi => {
+                // SAFETY: once per worker thread, which never uninitializes COM.
+                let _ = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+                Panel::Wmi(Wmi::connect().ok())
+            }
         }
     }
-    false
+
+    /// One read with one retry. Returns `(current, max)`.
+    fn read_raw(&self) -> Option<(u32, u32)> {
+        retry(|| match self {
+            Panel::Ddc(h) => ddc_read(h),
+            Panel::Wmi(w) => w.as_ref()?.read().map(|p| (p.into(), 100)),
+        })
+    }
+
+    /// One write with one retry.
+    fn write_raw(&self, raw: u32) -> bool {
+        retry(|| match self {
+            Panel::Ddc(h) => ddc_write(h, raw).then_some(()),
+            Panel::Wmi(w) => w.as_ref()?.set(raw as u8).then_some(()),
+        })
+        .is_some()
+    }
+}
+
+/// Run `f`, and once more after `RETRY_DELAY` if it failed.
+fn retry<T>(mut f: impl FnMut() -> Option<T>) -> Option<T> {
+    f().or_else(|| {
+        std::thread::sleep(RETRY_DELAY);
+        f()
+    })
+}
+
+/// One DDC read of VCP 0x10. Returns `(current, max)`.
+fn ddc_read(h: &PhysicalHandle) -> Option<(u32, u32)> {
+    let (mut cur, mut max) = (0u32, 0u32);
+    // SAFETY: valid physical-monitor handle; out-pointers are valid locals.
+    let ok = unsafe {
+        GetVCPFeatureAndVCPFeatureReply(h.raw(), VCP_BRIGHTNESS, None, &mut cur, Some(&mut max))
+    };
+    (ok != 0).then_some((cur, max))
+}
+
+/// One DDC write of VCP 0x10.
+fn ddc_write(h: &PhysicalHandle, raw: u32) -> bool {
+    // SAFETY: valid physical-monitor handle.
+    unsafe { SetVCPFeature(h.raw(), VCP_BRIGHTNESS, raw) != 0 }
 }
 
 /// Read and record the result in shared state; returns the percent on success.
-fn do_read(h: &PhysicalHandle, shared: &Shared) -> Option<u8> {
-    let (cur, max) = read_raw(h)?;
+fn do_read(p: &Panel, shared: &Shared) -> Option<u8> {
+    let (cur, max) = p.read_raw()?;
     let mut st = lock(&shared.0);
     st.max = Some(max);
     st.throttle.confirm(cur);
     Some(raw_to_percent(cur, max))
 }
 
-fn run(key: u64, handle: PhysicalHandle, shared: Shared, notify: Notify) {
+fn run(key: u64, backend: Backend, shared: Shared, notify: Notify) {
+    let panel = Panel::open(backend);
     while let Some(action) = next_action(&shared) {
         // No lock is held during DDC I/O or notify.
         match action {
-            Action::Read => match do_read(&handle, &shared) {
+            Action::Read => match do_read(&panel, &shared) {
                 Some(p) => notify(key, DdcEvent::Value(p)),
                 None => notify(key, DdcEvent::Unresponsive),
             },
             Action::Write(raw, max) => {
-                if write_raw(&handle, raw) {
+                if panel.write_raw(raw) {
                     lock(&shared.0).throttle.confirm(raw);
                     notify(key, DdcEvent::Written(raw_to_percent(raw, max)));
                 } else {
                     lock(&shared.0).throttle.invalidate();
-                    match do_read(&handle, &shared) {
+                    match do_read(&panel, &shared) {
                         Some(p) => {
                             notify(key, DdcEvent::ReadOnly);
                             notify(key, DdcEvent::Value(p));
@@ -226,10 +267,10 @@ fn run(key: u64, handle: PhysicalHandle, shared: Shared, notify: Notify) {
             }
         }
     }
-    // `handle` drops here, destroying the physical monitor.
+    // `panel` drops here (destroying a physical monitor handle / releasing WMI).
 }
 
 /// Blocking single read with one retry, for standalone `list`/`get`. Returns percent.
 pub fn read_once(handle: &PhysicalHandle) -> Option<u8> {
-    read_raw(handle).map(|(cur, max)| raw_to_percent(cur, max))
+    retry(|| ddc_read(handle)).map(|(cur, max)| raw_to_percent(cur, max))
 }

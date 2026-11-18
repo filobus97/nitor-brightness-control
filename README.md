@@ -23,7 +23,12 @@ Windows 11 hides new tray icons in the overflow menu. To keep Nitor's icons visi
 |---|---|
 | Mouse wheel over an icon | Brightness ± step (default 5) |
 | Shift + wheel | ± 1 |
-| Right click | Rescan monitors · Settings · Start with Windows · Exit |
+| Left click | Flyout with one slider per monitor; click a color dot to change that monitor's color |
+| Right click | Rescan monitors · Settings · Start with Windows · Control built-in display (laptops) · Exit |
+
+**Link all** (in the flyout footer) adds a master slider that moves every monitor together. Each monitor's slider then shows two small handles: drag them to set the range that monitor follows, so screens with different panels look equally bright.
+
+**Laptops:** the built-in screen is left alone by default. Enable **Control built-in display** in the tray menu to get an icon and slider for it too.
 
 ### Command line
 

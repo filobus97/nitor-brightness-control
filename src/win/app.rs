@@ -6,30 +6,35 @@
 //! - `present`: render + add/modify one tray icon.
 //! - window creation, window procedure, context menu, and the `run`/`standalone` entry points.
 
-use super::ddc::{self, DdcEvent, DdcWorker, Notify};
+use super::ddc::{self, Backend, DdcEvent, DdcWorker, Notify};
+use super::flyout::{self, Action, FlyoutRow};
 use super::icon::{self, IconContent, IconRenderer, IconSpec, OwnedIcon};
 use super::instance::{self, WINDOW_CLASS};
-use super::monitors::{self, FoundMonitor, PhysicalHandle};
+use super::monitors::{self, FoundMonitor};
 use super::theme::Theme;
 use super::tray::{self, TrayEvent, WM_APP_TRAY};
 use super::wheel::{self, WM_APP_WHEEL, WheelEvent};
+use super::wmi::Wmi;
 use super::{autostart, util};
 use crate::cli::{self, BrightnessOp, Command, Target};
 use crate::color::{Rgb, next_palette_color};
 use crate::config::{Config, MonitorSettings};
 use crate::i18n::{Key, Lang, tr};
+use crate::link::link_value;
 use std::cell::RefCell;
 use std::ffi::c_void;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::Graphics::Gdi::{HMONITOR, MONITOR_DEFAULTTONEAREST, MonitorFromPoint};
 use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Power::{POWERBROADCAST_SETTING, RegisterPowerSettingNotification};
-use windows::Win32::System::SystemServices::GUID_CONSOLE_DISPLAY_STATE;
+use windows::Win32::System::SystemServices::{
+    GUID_CONSOLE_DISPLAY_STATE, GUID_VIDEO_CURRENT_MONITOR_BRIGHTNESS,
+};
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
 };
@@ -54,6 +59,8 @@ const NIN_KEYSELECT: u32 = NIN_SELECT | NINF_KEY;
 const TIMER_WHEEL: usize = 1;
 const TIMER_RESCAN: usize = 2;
 const WHEEL_POLL_MS: u32 = 100;
+/// Brightness notifications this soon after Nitor's own change are treated as echoes.
+const OWN_CHANGE_WINDOW: Duration = Duration::from_secs(1);
 /// One wheel notch.
 const WHEEL_DELTA: i32 = 120;
 
@@ -65,6 +72,7 @@ const ID_RESCAN: u32 = 1;
 const ID_SETTINGS: u32 = 2;
 const ID_AUTOSTART: u32 = 3;
 const ID_EXIT: u32 = 4;
+const ID_INTERNAL: u32 = 5;
 
 /// Registered `TaskbarCreated` message (0 until registered).
 static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
@@ -84,6 +92,10 @@ struct Row {
     value: Option<u8>,
     /// Controllable (answered its first read).
     active: bool,
+    /// Built-in (laptop) panel.
+    internal: bool,
+    /// Built-in panel left alone because `internal_display` is off.
+    internal_disabled: bool,
 }
 
 impl Row {
@@ -92,10 +104,10 @@ impl Row {
     }
 }
 
-/// A discovered monitor plus the handle to probe it with (`None`: not controllable).
+/// A discovered monitor plus the backend to probe it with (`None`: not controllable).
 struct Entry {
     row: Row,
-    handle: Option<PhysicalHandle>,
+    backend: Option<Backend>,
 }
 
 fn settings_of(config: &Config, id: &str) -> MonitorSettings {
@@ -104,7 +116,8 @@ fn settings_of(config: &Config, id: &str) -> MonitorSettings {
 
 /// Turn enumerated monitors into rows in tray order (settings order, then left edge),
 /// assigning palette colors to monitors without one (stored into `config`; the flag
-/// says whether that changed it). Hidden and `skip`ped monitors lose their handle.
+/// says whether that changed it). Hidden and `skip`ped monitors get no backend; built-in
+/// panels get WMI when `config.general.internal_display` is on, else none.
 fn build_entries(
     config: &mut Config,
     mut found: Vec<FoundMonitor>,
@@ -136,7 +149,11 @@ fn build_entries(
             c
         });
         let usable = !s.hidden && !skip.contains(&f.stable_id);
-        let handle = if usable { f.handle.take() } else { None };
+        let backend = match (usable, f.internal) {
+            (false, _) => None,
+            (true, false) => f.handle.take().map(Backend::Ddc),
+            (true, true) => config.general.internal_display.then_some(Backend::Wmi),
+        };
         entries.push(Entry {
             row: Row {
                 id: f.stable_id,
@@ -147,8 +164,10 @@ fn build_entries(
                 color,
                 value: None,
                 active: false,
+                internal: f.internal,
+                internal_disabled: usable && f.internal && !config.general.internal_display,
             },
-            handle,
+            backend,
         });
     }
     (entries, changed)
@@ -243,6 +262,7 @@ fn list_line(n: usize, r: &Row) -> String {
     let state = match (r.active, r.value) {
         (true, Some(v)) => format!("{v}%"),
         (true, None) => "–".into(),
+        (false, _) if r.internal_disabled => "built-in (disabled)".into(),
         (false, _) => "not controllable".into(),
     };
     format!(
@@ -289,6 +309,8 @@ struct Monitor {
     probed: bool,
     /// Wheel delta not yet worth a full notch.
     remainder: i32,
+    /// When Nitor last changed this monitor's brightness itself.
+    last_adjust: Option<Instant>,
     /// `Some` while a tray icon exists.
     icon: Option<Rendered>,
 }
@@ -405,7 +427,7 @@ impl App {
         let (entries, changed) = build_entries(&mut self.config, monitors::enumerate(), &skip);
         let probing: Vec<String> = entries
             .iter()
-            .filter(|e| e.handle.is_some())
+            .filter(|e| e.backend.is_some())
             .map(|e| e.row.id.clone())
             .collect();
         let any = !probing.is_empty();
@@ -418,7 +440,7 @@ impl App {
         for (i, e) in entries.into_iter().enumerate() {
             let key = self.next_key;
             self.next_key += 1;
-            let worker = e.handle.map(|h| self.spawn_worker(key, h, interval));
+            let worker = e.backend.map(|b| self.spawn_worker(key, b, interval));
             self.monitors.push(Monitor {
                 row: e.row,
                 uid: i as u32 + 1,
@@ -427,6 +449,7 @@ impl App {
                 health: Health::Ok,
                 probed: false,
                 remainder: 0,
+                last_adjust: None,
                 icon: None,
             });
         }
@@ -438,7 +461,7 @@ impl App {
         }
     }
 
-    fn spawn_worker(&self, key: u64, handle: PhysicalHandle, interval: Duration) -> DdcWorker {
+    fn spawn_worker(&self, key: u64, backend: Backend, interval: Duration) -> DdcWorker {
         let queue = self.queue.clone();
         // HWND is not Send; carry it as an integer.
         let hwnd = self.hwnd.0 as isize;
@@ -454,7 +477,7 @@ impl App {
                 );
             }
         });
-        let worker = DdcWorker::spawn(key, handle, interval, notify);
+        let worker = DdcWorker::spawn(key, backend, interval, notify);
         worker.set_paused(self.display_off);
         worker
     }
@@ -481,7 +504,7 @@ impl App {
         let first = !m.probed;
         m.probed = true;
         if first && event == DdcEvent::Unresponsive {
-            // Not controllable: no icon, release the handle.
+            // Not controllable: no icon, release the backend.
             m.worker = None;
             return;
         }
@@ -535,6 +558,7 @@ impl App {
 
     /// Reload the config from disk (manual edits apply) and scan again.
     fn rescan(&mut self) {
+        flyout::hide();
         // SAFETY: plain timer call on our own window.
         unsafe {
             let _ = KillTimer(Some(self.hwnd), TIMER_RESCAN);
@@ -604,6 +628,7 @@ impl App {
         let (spec, tip) = (self.spec_for(m), self.tooltip_for(m));
         let m = &mut self.monitors[i];
         present(self.hwnd, &self.renderer, m.uid, &mut m.icon, spec, tip);
+        self.update_flyout();
     }
 
     fn refresh_placeholder(&mut self) {
@@ -738,6 +763,7 @@ impl App {
         let new = op.apply(current, s.min, s.max);
         if new != current {
             m.row.value = Some(new);
+            m.last_adjust = Some(Instant::now());
             worker.write(new);
             self.refresh(i);
         }
@@ -752,16 +778,129 @@ impl App {
         }
     }
 
+    // --- flyout -----------------------------------------------------------
+
+    /// The flyout's rows: active monitors in tray order.
+    fn flyout_rows(&self) -> Vec<FlyoutRow> {
+        self.monitors
+            .iter()
+            .filter(|m| m.row.active)
+            .map(|m| {
+                let s = settings_of(&self.config, &m.row.id);
+                FlyoutRow {
+                    uid: m.uid,
+                    name: m.row.name().to_string(),
+                    color: m.row.color,
+                    value: m.row.value,
+                    enabled: m.health != Health::Unresponsive,
+                    link_min: s.link_min,
+                    link_max: s.link_max,
+                }
+            })
+            .collect()
+    }
+
+    /// Push changed values/colors to an open flyout.
+    fn update_flyout(&self) {
+        if flyout::is_visible() {
+            flyout::update(self.flyout_rows());
+        }
+    }
+
+    /// Left click on a tray icon: close the flyout if open, else open it at `anchor`.
+    fn toggle_flyout(&self, anchor: POINT) {
+        if flyout::is_visible() {
+            flyout::hide();
+        } else if self.monitors.iter().any(|m| m.row.active) {
+            if self.config.general.refresh_on_open {
+                self.read_all();
+            }
+            let linked = self.config.general.linked;
+            flyout::show(anchor, self.flyout_rows(), linked, self.lang);
+        }
+    }
+
+    fn monitor_by_uid(&self, uid: u32) -> Option<usize> {
+        self.monitors
+            .iter()
+            .position(|m| m.uid == uid && m.row.active)
+    }
+
+    fn set_color(&mut self, i: usize, color: Rgb) {
+        let m = &mut self.monitors[i];
+        m.row.color = color;
+        let id = m.row.id.clone();
+        self.config.monitors.entry(id).or_default().color = Some(color);
+        self.refresh(i);
+    }
+
+    /// Put monitor `i` where the master slider at `master` places it (its calibrated range).
+    fn apply_master(&mut self, i: usize, master: u8) {
+        let s = settings_of(&self.config, &self.monitors[i].row.id);
+        self.adjust(
+            i,
+            BrightnessOp::Set(link_value(master, s.link_min, s.link_max)),
+        );
+    }
+
+    fn on_flyout(&mut self, action: Action) {
+        match action {
+            Action::SetBrightness(uid, v) => {
+                if let Some(i) = self.monitor_by_uid(uid) {
+                    self.adjust(i, BrightnessOp::Set(v));
+                }
+            }
+            Action::SetAll(master) => {
+                for i in 0..self.monitors.len() {
+                    if self.monitors[i].row.active {
+                        self.apply_master(i, master);
+                    }
+                }
+            }
+            Action::SetColor(uid, color) => {
+                if let Some(i) = self.monitor_by_uid(uid) {
+                    self.set_color(i, color);
+                    self.save();
+                }
+            }
+            Action::SetLinked(linked) => {
+                self.config.general.linked = linked;
+                self.save();
+            }
+            Action::SetLinkRange(uid, lo, hi) => {
+                if let Some(i) = self.monitor_by_uid(uid) {
+                    let id = self.monitors[i].row.id.clone();
+                    let s = self.config.monitors.entry(id).or_default();
+                    (s.link_min, s.link_max) = (lo, hi);
+                    self.save();
+                    // Show the effect of the new range right away.
+                    self.apply_master(i, flyout::master());
+                }
+            }
+            Action::Rescan => self.rescan(),
+            Action::Settings => self.open_settings(),
+        }
+        // A value clamped by the monitor's min/max may not have changed anything above.
+        self.update_flyout();
+    }
+
     // --- menu -------------------------------------------------------------
+
+    fn open_settings(&mut self) {
+        if !self.path.exists() {
+            self.save();
+        }
+        util::open_with_default_app(&self.path);
+    }
 
     fn on_menu(&mut self, cmd: u32) {
         match cmd {
             ID_RESCAN => self.rescan(),
-            ID_SETTINGS => {
-                if !self.path.exists() {
-                    self.save();
-                }
-                util::open_with_default_app(&self.path);
+            ID_SETTINGS => self.open_settings(),
+            ID_INTERNAL => {
+                self.config.general.internal_display = !self.config.general.internal_display;
+                self.save();
+                self.scan();
             }
             ID_AUTOSTART => {
                 let _ = autostart::set(!autostart::is_enabled());
@@ -779,6 +918,32 @@ impl App {
     }
 
     // --- power ------------------------------------------------------------
+
+    /// The built-in brightness changed outside Nitor (Fn keys, Quick Settings):
+    /// show the new value without writing it back.
+    fn on_internal_brightness(&mut self, percent: u8) {
+        let Some(i) = self
+            .monitors
+            .iter()
+            .position(|m| m.row.internal && m.worker.is_some() && m.row.active)
+        else {
+            return;
+        };
+        // Windows also reports Nitor's own writes; while the user is adjusting, those
+        // echoes would make the value jump back.
+        if self.monitors[i]
+            .last_adjust
+            .is_some_and(|t| t.elapsed() < OWN_CHANGE_WINDOW)
+        {
+            return;
+        }
+        self.monitors[i].row.value = Some(percent.min(100));
+        // Resync the worker's idea of the panel so the next wheel step is not skipped.
+        if let Some(w) = &self.monitors[i].worker {
+            w.read();
+        }
+        self.refresh(i);
+    }
 
     fn on_display_state(&mut self, off: bool) {
         if off == self.display_off {
@@ -816,13 +981,7 @@ impl App {
                 self.for_target(target, |app, i| app.adjust(i, *op))
             }
             Command::Color { target, color } => {
-                let result = self.for_target(target, |app, i| {
-                    let m = &mut app.monitors[i];
-                    m.row.color = *color;
-                    let id = m.row.id.clone();
-                    app.config.monitors.entry(id).or_default().color = Some(*color);
-                    app.refresh(i);
-                });
+                let result = self.for_target(target, |app, i| app.set_color(i, *color));
                 self.save();
                 result
             }
@@ -892,20 +1051,29 @@ fn present(
 // Window procedure
 // ---------------------------------------------------------------------------
 
+/// Called by the flyout's window procedure (the app is not borrowed there).
+fn on_flyout_action(action: Action) {
+    with_app(|a| a.on_flyout(action));
+}
+
 fn on_tray(hwnd: HWND, ev: TrayEvent) {
     match ev.msg {
         WM_MOUSEMOVE => {
             with_app(|a| a.arm_wheel());
         }
         NIN_SELECT | NIN_KEYSELECT => {
-            with_app(|a| a.read_all());
+            with_app(|a| a.toggle_flyout(POINT { x: ev.x, y: ev.y }));
         }
         WM_CONTEXTMENU => {
-            let Some(lang) = with_app(|a| a.lang) else {
+            let Some((lang, internal)) = with_app(|a| {
+                // Offer the built-in toggle only if the last scan found such a panel.
+                let found = a.monitors.iter().any(|m| m.row.internal);
+                (a.lang, found.then_some(a.config.general.internal_display))
+            }) else {
                 return;
             };
             // The menu runs a nested message loop: the app must not be borrowed meanwhile.
-            let cmd = show_menu(hwnd, ev.x, ev.y, lang, autostart::is_enabled());
+            let cmd = show_menu(hwnd, ev.x, ev.y, lang, autostart::is_enabled(), internal);
             with_app(|a| a.on_menu(cmd));
         }
         _ => {}
@@ -913,7 +1081,15 @@ fn on_tray(hwnd: HWND, ev: TrayEvent) {
 }
 
 /// Show the tray context menu at a screen point and return the chosen command id (0: none).
-fn show_menu(hwnd: HWND, x: i32, y: i32, lang: Lang, autostart_on: bool) -> u32 {
+/// `internal` is `Some(checked)` when the "built-in display" item should be shown.
+fn show_menu(
+    hwnd: HWND,
+    x: i32,
+    y: i32,
+    lang: Lang,
+    autostart_on: bool,
+    internal: Option<bool>,
+) -> u32 {
     // SAFETY: standard menu calls on a menu we create and destroy here; every text buffer
     // outlives the AppendMenuW call that copies it.
     unsafe {
@@ -932,6 +1108,10 @@ fn show_menu(hwnd: HWND, x: i32, y: i32, lang: Lang, autostart_on: bool) -> u32 
             MENU_ITEM_FLAGS(0)
         };
         add(checked, ID_AUTOSTART, Key::MenuStartWithWindows);
+        if let Some(on) = internal {
+            let checked = if on { MF_CHECKED } else { MENU_ITEM_FLAGS(0) };
+            add(checked, ID_INTERNAL, Key::MenuInternalDisplay);
+        }
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         add(MENU_ITEM_FLAGS(0), ID_EXIT, Key::MenuExit);
 
@@ -961,13 +1141,20 @@ fn on_power(wparam: WPARAM, lparam: LPARAM) {
         PBT_POWERSETTINGCHANGE if lparam.0 != 0 => {
             let p = lparam.0 as *const POWERBROADCAST_SETTING;
             // SAFETY: for this notification lparam points to a POWERBROADCAST_SETTING
-            // followed by `DataLength` bytes of data (a u32 for the display state).
-            let state = unsafe {
-                ((*p).PowerSetting == GUID_CONSOLE_DISPLAY_STATE && (*p).DataLength >= 4)
-                    .then(|| std::ptr::addr_of!((*p).Data).cast::<u32>().read_unaligned())
+            // followed by `DataLength` bytes of data (a u32 for both settings we watch).
+            let (setting, data) = unsafe {
+                let data = ((*p).DataLength >= 4)
+                    .then(|| std::ptr::addr_of!((*p).Data).cast::<u32>().read_unaligned());
+                ((*p).PowerSetting, data)
             };
-            if let Some(state) = state {
-                with_app(|a| a.on_display_state(state == 0));
+            match data {
+                Some(state) if setting == GUID_CONSOLE_DISPLAY_STATE => {
+                    with_app(|a| a.on_display_state(state == 0));
+                }
+                Some(percent) if setting == GUID_VIDEO_CURRENT_MONITOR_BRIGHTNESS => {
+                    with_app(|a| a.on_internal_brightness(percent.min(100) as u8));
+                }
+                _ => {}
             }
         }
         _ => {}
@@ -1103,11 +1290,17 @@ pub fn run(config_path: PathBuf, initial: Vec<Command>) -> i32 {
     let Some(hwnd) = create_window() else {
         return 1;
     };
+    flyout::init(on_flyout_action);
     // SAFETY: valid window handle and GUID; the notification ends with the window.
     unsafe {
         let _ = RegisterPowerSettingNotification(
             HANDLE(hwnd.0),
             &GUID_CONSOLE_DISPLAY_STATE,
+            DEVICE_NOTIFY_WINDOW_HANDLE,
+        );
+        let _ = RegisterPowerSettingNotification(
+            HANDLE(hwnd.0),
+            &GUID_VIDEO_CURRENT_MONITOR_BRIGHTNESS,
             DEVICE_NOTIFY_WINDOW_HANDLE,
         );
     }
@@ -1135,10 +1328,19 @@ pub fn standalone(config_path: &Path, commands: &[Command]) -> i32 {
     let mut config = Config::load(config_path).unwrap_or_default();
     let skip = config.general.detection_in_progress.clone();
     let (entries, _) = build_entries(&mut config, monitors::enumerate(), &skip);
+    // SAFETY: this thread has no COM apartment yet; WMI needs one for the built-in display.
+    let _ = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+    let wmi = Wmi::connect()
+        .ok()
+        .filter(|_| config.general.internal_display);
     let rows: Vec<Row> = entries
         .into_iter()
         .map(|mut e| {
-            e.row.value = e.handle.as_ref().and_then(ddc::read_once);
+            e.row.value = match &e.backend {
+                Some(Backend::Ddc(h)) => ddc::read_once(h),
+                Some(Backend::Wmi) => wmi.as_ref().and_then(Wmi::read),
+                None => None,
+            };
             e.row.active = e.row.value.is_some();
             e.row
         })
