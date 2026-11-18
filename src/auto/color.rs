@@ -13,6 +13,10 @@ pub const WARM_LIMIT_K: u32 = 4000;
 
 /// Warmest value the colour sliders offer (below [`WARM_LIMIT_K`] only when experimental).
 pub const UI_MIN_K: u32 = 2700;
+/// The flyout slider moves in steps of this many kelvin, from [`UI_MIN_K`] to [`MAX_K`].
+pub const UI_STEP_K: u32 = 50;
+/// Number of steps of the flyout slider (its positions are `0..=UI_STEPS`).
+pub const UI_STEPS: u8 = ((MAX_K - UI_MIN_K) / UI_STEP_K) as u8;
 /// Smallest kelvin change worth applying; the planner wakes only for steps this big.
 pub const MIN_DELTA_K: f32 = 100.0;
 /// A DDC monitor's gains are written at most this often (seconds): they live in its EEPROM.
@@ -21,6 +25,22 @@ pub const DDC_MIN_INTERVAL_SECS: u64 = 300;
 /// True when `kelvin` needs the experimental extended gamma range.
 pub fn needs_experimental_warm(kelvin: u32) -> bool {
     kelvin < WARM_LIMIT_K
+}
+
+/// Flyout slider position (nearest step) of a temperature.
+pub fn kelvin_step(kelvin: u32) -> u8 {
+    let k = kelvin.clamp(UI_MIN_K, MAX_K) - UI_MIN_K;
+    ((k + UI_STEP_K / 2) / UI_STEP_K) as u8
+}
+
+/// Temperature of a flyout slider position.
+pub fn step_kelvin(step: u8) -> u32 {
+    UI_MIN_K + u32::from(step.min(UI_STEPS)) * UI_STEP_K
+}
+
+/// What a white pixel looks like at `kelvin`, for drawing (`[r, g, b]`).
+pub fn tint(kelvin: u32) -> [u8; 3] {
+    rgb_multipliers(kelvin).map(|m| (m * 255.0).round() as u8)
 }
 
 /// How a display gets its colour temperature.
@@ -120,6 +140,22 @@ mod tests {
                 assert_eq!(*v, (i * 257) as u16);
             }
         }
+    }
+
+    #[test]
+    fn slider_steps() {
+        assert_eq!((kelvin_step(UI_MIN_K), kelvin_step(MAX_K)), (0, UI_STEPS));
+        assert_eq!(UI_STEPS, 76);
+        assert_eq!(kelvin_step(100), 0);
+        assert_eq!(kelvin_step(9000), UI_STEPS);
+        assert_eq!(kelvin_step(4537), 37);
+        assert_eq!(step_kelvin(37), 4550);
+        assert_eq!(step_kelvin(200), MAX_K);
+        for s in 0..=UI_STEPS {
+            assert_eq!(kelvin_step(step_kelvin(s)), s);
+        }
+        assert_eq!(tint(MAX_K), [255, 255, 255]);
+        assert!(tint(UI_MIN_K)[2] < tint(UI_MIN_K)[1]);
     }
 
     #[test]

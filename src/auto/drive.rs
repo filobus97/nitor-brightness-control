@@ -87,7 +87,12 @@ pub fn level_bounds(auto: &Auto) -> (f32, f32) {
 /// for the configured time.
 pub fn user_override(st: &mut MonitorState, auto: &Auto, now: i64) {
     st.applied = None;
-    st.override_until = Some(match location(auto) {
+    st.override_until = Some(override_until(auto, now));
+}
+
+/// When a manual change made at `now` stops holding automation off.
+pub fn override_until(auto: &Auto, now: i64) -> i64 {
+    match location(auto) {
         Some((lat, lon)) => override_expiry(
             auto.override_mode,
             auto.override_minutes,
@@ -100,7 +105,7 @@ pub fn user_override(st: &mut MonitorState, auto: &Auto, now: i64) {
             now + i64::from(auto.override_minutes) * 60
         }
         None => now + MAX_SLEEP_SECS,
-    });
+    }
 }
 
 /// Decide for one monitor. `link` is its calibrated `(min, max)`, `current` its value now.

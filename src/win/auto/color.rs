@@ -13,7 +13,7 @@ use super::{TIMER_COLOR, WM_APP_AUTO_COLOR};
 use crate::auto::color::{
     MAX_K, MIN_DELTA_K, Method, curve, gamma_kelvin, gamma_ramp, night_light_on,
 };
-use crate::auto::drive::{location, timer_delay_ms};
+use crate::auto::drive::{location, override_until, timer_delay_ms};
 use crate::auto::plan::{PlanInput, plan};
 use crate::config::Config;
 use crate::win::ddc::{ColorRequest, DdcWorker};
@@ -69,6 +69,12 @@ pub struct ColorEngine {
     hwnd: isize,
     /// Kelvin the planner last settled on (shared by all displays).
     kelvin: Option<f32>,
+    /// Flyout override while color is automatic: `(kelvin, unix time it ends)`. Memory only.
+    hold: Option<(u32, i64)>,
+    /// The temperature the displays were last brought to (neutral when none).
+    current: u32,
+    /// `gamma_range_extended()` and the option, as of the last planning round.
+    extended: bool,
     displays: HashMap<String, Disp>,
 }
 
@@ -77,6 +83,9 @@ impl ColorEngine {
         ColorEngine {
             hwnd: hwnd.0 as isize,
             kelvin: None,
+            hold: None,
+            current: MAX_K,
+            extended: false,
             displays: HashMap::new(),
         }
     }
@@ -86,11 +95,52 @@ impl ColorEngine {
         self.displays.get(id).and_then(|d| d.method)
     }
 
-    /// One planning round: bring every display to the planned temperature, or back to
-    /// neutral while color automation is off or paused (`pause_until`), and re-arm the timer.
+    /// The temperature the displays show now (6500 K: neutral).
+    pub fn current(&self) -> u32 {
+        self.current
+    }
+
+    /// The flyout slider is being dragged: show `kelvin` through gamma ramps only; DDC
+    /// monitors wait for the final value (their gains live in an EEPROM).
+    pub fn preview(&mut self, views: &[ColorView], kelvin: u32) {
+        for v in views {
+            self.apply(v, kelvin, true);
+        }
+    }
+
+    /// The user picked `kelvin` in the flyout while color is automatic: hold the plan off
+    /// for as long as a manual brightness change would (see `Auto::override_mode`).
+    pub fn hold(&mut self, cfg: &Config, kelvin: u32) {
+        self.hold = Some((kelvin, override_until(&cfg.auto, now_unix())));
+    }
+
+    /// One planning round: bring every display to the manual temperature (flyout), or the
+    /// planned one, or back to neutral while color automation is off or paused
+    /// (`pause_until`), and re-arm the timer.
     pub fn plan(&mut self, cfg: &Config, views: &[ColorView], pause_until: Option<i64>) {
         let now = now_unix();
         let a = &cfg.auto;
+        self.extended = a.experimental_warm && gamma_range_extended();
+        if !a.color_enabled || self.hold.is_some_and(|(_, t)| t <= now) {
+            self.hold = None;
+            // The plan starts afresh after a hold.
+            self.kelvin = None;
+        }
+        let manual = match (a.color_enabled, self.hold) {
+            (true, hold) => hold.map(|(k, t)| (k, Some(t))),
+            (false, _) => a
+                .manual_kelvin
+                .map(|k| (u32::from(k), None))
+                .filter(|&(k, _)| k < MAX_K),
+        };
+        if let Some((k, until)) = manual {
+            self.current = k;
+            for v in views {
+                self.apply(v, k, false);
+            }
+            self.arm(until, now);
+            return;
+        }
         let paused = pause_until.filter(|&t| t > now);
         if !a.color_enabled || paused.is_some() {
             self.neutral(views);
@@ -115,16 +165,18 @@ impl ColorEngine {
             self.kelvin = Some(k);
         }
         if let Some(k) = self.kelvin {
-            let extended = a.experimental_warm && gamma_range_extended();
+            self.current = k.round() as u32;
             for v in views {
-                self.apply(v, k.round() as u32, extended);
+                self.apply(v, self.current, false);
             }
         }
         self.arm(Some(p.next_wake_unix), now);
     }
 
-    /// Give `v` the temperature `kelvin` by its method, deciding the method first.
-    fn apply(&mut self, v: &ColorView, kelvin: u32, extended: bool) {
+    /// Give `v` the temperature `kelvin` by its method, deciding the method first. With
+    /// `live` (a drag in progress) only gamma ramps are written.
+    fn apply(&mut self, v: &ColorView, kelvin: u32, live: bool) {
+        let extended = self.extended;
         let d = self.displays.entry(v.id.to_string()).or_default();
         let ddc = v.ddc.filter(|_| !d.ddc_failed);
         if d.method.is_none() && ddc.is_none() {
@@ -143,6 +195,7 @@ impl ColorEngine {
                 }
             }
             (Some(Method::Hdr), _) | (_, None) => {}
+            (_, Some(_)) if live => {}
             // Hardware, or still probing: the worker probes before its first write.
             (_, Some(w)) => {
                 if d.shown != Some(kelvin) {
@@ -177,6 +230,7 @@ impl ColorEngine {
     /// Back to neutral (6500 K) on every display that was changed; idempotent.
     fn neutral(&mut self, views: &[ColorView]) {
         self.kelvin = None;
+        self.current = MAX_K;
         for v in views {
             let Some(d) = self.displays.get_mut(v.id) else {
                 continue;
