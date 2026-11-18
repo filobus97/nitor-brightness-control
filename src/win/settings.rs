@@ -111,6 +111,9 @@ pub struct Snapshot {
     /// Plus: Windows' own adaptive brightness is on and the built-in display is automated.
     #[cfg(feature = "plus")]
     pub adaptive_conflict: bool,
+    /// Plus: outcome of the last weather fetch.
+    #[cfg(feature = "plus")]
+    pub weather_status: crate::auto::weather::Status,
 }
 
 /// A change to one monitor's settings.
@@ -135,6 +138,7 @@ pub enum AutoEdit {
     Day(u8),
     Night(u8),
     UseSensor(bool),
+    Weather(bool),
     Override(OverrideMode),
     Source(LocationSource),
     /// A typed coordinate, already validated.
@@ -907,6 +911,8 @@ impl State {
         match ctl {
             Ctl::Button(Btn::Up(i)) => i > 0,
             Ctl::Button(Btn::Down(i)) => i + 1 < self.snap.monitors.len(),
+            #[cfg(feature = "plus")]
+            Ctl::Auto(c) => self.auto_enabled(c),
             _ => true,
         }
     }

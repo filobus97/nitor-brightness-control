@@ -1208,6 +1208,8 @@ impl App {
             monitors,
             #[cfg(feature = "plus")]
             sensor_available: auto::sensor_available(),
+            #[cfg(feature = "plus")]
+            weather_status: self.auto.weather_status(),
             // Only a built-in panel can clash with Windows' adaptive brightness.
             #[cfg(feature = "plus")]
             adaptive_conflict: self.config.auto.enabled
@@ -1491,6 +1493,7 @@ impl App {
             E::Day(v) => a.day_brightness = v.min(100),
             E::Night(v) => a.night_brightness = v.min(100),
             E::UseSensor(on) => a.use_sensor = on,
+            E::Weather(on) => a.weather = on,
             E::Override(mode) => a.override_mode = mode,
             E::Source(source) => a.location_source = source,
             E::Latitude(v) => a.latitude = Some(v),
@@ -1512,6 +1515,13 @@ impl App {
         if self.auto.on_sensor_settle() {
             self.auto_replan();
         }
+    }
+
+    /// A weather fetch finished: plan with the new forecast and refresh the Settings status.
+    fn auto_weather(&mut self) {
+        self.auto.on_weather();
+        self.auto_replan();
+        self.update_settings();
     }
 
     /// Store a location found by Windows into the config.
@@ -1762,6 +1772,10 @@ unsafe extern "system" fn wnd_proc(
         #[cfg(feature = "plus")]
         auto::WM_APP_AUTO_SENSOR => {
             with_app(App::auto_sensor);
+        }
+        #[cfg(feature = "plus")]
+        auto::WM_APP_AUTO_WEATHER => {
+            with_app(App::auto_weather);
         }
         #[cfg(feature = "plus")]
         auto::WM_APP_AUTO_LOCATION => {

@@ -18,6 +18,7 @@ const NOTE_LINE_CHARS: f32 = 66.0;
 pub(super) enum AutoCtl {
     Enabled,
     UseSensor,
+    Weather,
     Day,
     Night,
     /// Option `k` of "after a manual change".
@@ -82,6 +83,14 @@ impl State {
             self.note_row(b, self.pt(K::AutoAdaptiveNote));
             self.button_row(b, AutoCtl::Adaptive, self.pt(K::AutoAdaptiveTitle));
         }
+        b.switch_row(
+            Ctl::Auto(AutoCtl::Weather),
+            self.pt(K::AutoWeather),
+            Some(self.pt(K::AutoWeatherHint)),
+        );
+        if let Some(text) = self.weather_status_text() {
+            self.note_row(b, text);
+        }
         self.seg_row(
             b,
             self.pt(K::AutoOverride),
@@ -113,6 +122,33 @@ impl State {
             self.button_row(b, AutoCtl::Map, self.pt(K::LocMap));
         }
         b.end_card(SECTION_GAP);
+    }
+
+    /// Weather needs a location to ask about; everything else is always available.
+    pub(super) fn auto_enabled(&self, c: AutoCtl) -> bool {
+        let a = &self.snap.config.auto;
+        c != AutoCtl::Weather || (a.latitude.is_some() && a.longitude.is_some())
+    }
+
+    /// "Last update: HH:MM, cloud cover N%" or the last error.
+    fn weather_status_text(&self) -> Option<String> {
+        use crate::auto::weather::Status;
+        if !self.snap.config.auto.weather {
+            return None;
+        }
+        match &self.snap.weather_status {
+            Status::None => None,
+            Status::Ok { at: (h, m), cover } => Some(
+                self.pt(PlusKey::AutoWeatherOk)
+                    .replacen("{}", &format!("{h:02}:{m:02}"), 1)
+                    .replacen("{}", &cover.to_string(), 1),
+            ),
+            Status::Failed(e) => Some(tr_with(
+                self.lang(),
+                Key::Plus(PlusKey::AutoWeatherFailed),
+                e,
+            )),
+        }
     }
 
     /// Title, slider and value of a day/night level.
@@ -238,6 +274,7 @@ impl State {
         let edit = match c {
             AutoCtl::Enabled => AutoEdit::Enabled(!a.enabled),
             AutoCtl::UseSensor => AutoEdit::UseSensor(!a.use_sensor),
+            AutoCtl::Weather => AutoEdit::Weather(!a.weather),
             AutoCtl::Day | AutoCtl::Night => {
                 self.drag = Some(Drag::Level(c));
                 return self.auto_drag(layout, c, x);
@@ -398,6 +435,13 @@ impl State {
         match c {
             AutoCtl::Enabled => cv.switch(r, a.enabled, self.theme.accent),
             AutoCtl::UseSensor => cv.switch(r, a.use_sensor, self.theme.accent),
+            AutoCtl::Weather => {
+                cv.switch(r, a.weather, self.theme.accent);
+                if !self.auto_enabled(c) {
+                    // Greyed out: veil the switch with the card colour.
+                    cv.fill(r, (r.b - r.t) / 2.0, pal.card.0, 0.6);
+                }
+            }
             AutoCtl::Day | AutoCtl::Night => {
                 let level = if c == AutoCtl::Day {
                     a.day_brightness

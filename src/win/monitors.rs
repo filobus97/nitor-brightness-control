@@ -1,6 +1,10 @@
 //! Monitor discovery and stable identity (spec §8).
 
 use std::collections::HashMap;
+#[cfg(feature = "plus")]
+use windows::Win32::Devices::Display::{
+    DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO, DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO,
+};
 use windows::Win32::Devices::Display::{
     DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME, DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME,
     DISPLAYCONFIG_MODE_INFO, DISPLAYCONFIG_OUTPUT_TECHNOLOGY_DISPLAYPORT_EMBEDDED,
@@ -66,6 +70,9 @@ pub struct FoundMonitor {
     pub device_path: String,
     /// Raw `DISPLAYCONFIG_VIDEO_OUTPUT_TECHNOLOGY` value (-1 if unknown), for diagnostics.
     pub output_tech: i32,
+    /// Plus: HDR / advanced colour is on (gamma ramps do not apply there).
+    #[cfg(feature = "plus")]
+    pub advanced_color: bool,
 }
 
 /// What DisplayConfig knows about one active path's target.
@@ -77,6 +84,8 @@ struct Target {
     edid_prod: u16,
     output_tech: i32,
     internal: bool,
+    #[cfg(feature = "plus")]
+    advanced_color: bool,
 }
 
 fn from_wide(w: &[u16]) -> String {
@@ -141,6 +150,8 @@ fn query_targets() -> Vec<Target> {
             edid_mfg: tgt.edidManufactureId,
             edid_prod: tgt.edidProductCodeId,
             output_tech: p.targetInfo.outputTechnology.0,
+            #[cfg(feature = "plus")]
+            advanced_color: advanced_color_enabled(p),
             internal: matches!(
                 p.targetInfo.outputTechnology,
                 DISPLAYCONFIG_OUTPUT_TECHNOLOGY_INTERNAL
@@ -151,6 +162,19 @@ fn query_targets() -> Vec<Target> {
         });
     }
     out
+}
+
+/// Plus: whether HDR / advanced colour is enabled on the path's target.
+#[cfg(feature = "plus")]
+fn advanced_color_enabled(p: &DISPLAYCONFIG_PATH_INFO) -> bool {
+    let mut info = DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO::default();
+    info.header.r#type = DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO;
+    info.header.size = size_of::<DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO>() as u32;
+    info.header.adapterId = p.targetInfo.adapterId;
+    info.header.id = p.targetInfo.id;
+    // SAFETY: header.size matches the struct that follows the header; the union is plain
+    // bits, read as the u32 of which bit 1 is `advancedColorEnabled`.
+    unsafe { DisplayConfigGetDeviceInfo(&mut info.header) == 0 && info.Anonymous.value & 2 != 0 }
 }
 
 /// Split `\\?\DISPLAY#DEL41D9#5&2a3c1b&0&UID4352#{guid}` into (model, instance).
@@ -369,6 +393,8 @@ pub fn enumerate() -> Vec<FoundMonitor> {
                 internal: target.is_some_and(|t| t.internal),
                 device_path: target.map(|t| t.device_path.clone()).unwrap_or_default(),
                 output_tech: target.map_or(-1, |t| t.output_tech),
+                #[cfg(feature = "plus")]
+                advanced_color: target.is_some_and(|t| t.advanced_color),
             });
         }
     }

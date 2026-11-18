@@ -3,7 +3,7 @@
 //! The Windows engine collects the inputs (config, clock, sensor level, the monitor's
 //! current value and link range), calls [`step`] for every monitor and applies the writes.
 
-use super::curve::DayCurve;
+use super::curve::{DEFAULT_CLOUD_STRENGTH, DayCurve};
 use super::plan::{MAX_SLEEP_SECS, MIN_STEP_PCT, PlanInput, override_expiry, plan, should_write};
 use crate::config::{Auto, OverrideMode};
 use crate::link::link_value;
@@ -47,6 +47,9 @@ pub struct Context<'a> {
     pub pause_until: Option<i64>,
     /// Level from the ambient light sensor; replaces the solar curve while `Some`.
     pub sensor_level: Option<f32>,
+    /// Bucketed cloud cover (percent) from the weather forecast, when enabled and fresh;
+    /// lowers the solar day level. Ignored while a sensor level is present.
+    pub cloud_cover: Option<u8>,
 }
 
 /// Result of one [`step`].
@@ -122,10 +125,13 @@ pub fn step(st: &mut MonitorState, ctx: &Context, link: (u8, u8), current: u8) -
         let due = st.applied.is_none_or(|a| (a - level).abs() >= MIN_STEP_PCT);
         (due.then_some(level), Reason::Sensor, None)
     } else if let Some((lat, lon)) = location(ctx.auto) {
+        let base = curve(ctx.auto);
         let p = plan(&PlanInput {
             lat,
             lon,
-            curve: curve(ctx.auto),
+            curve: ctx.cloud_cover.map_or(base, |c| {
+                base.with_clouds(f32::from(c), DEFAULT_CLOUD_STRENGTH)
+            }),
             applied: st.applied,
             min_delta: MIN_STEP_PCT,
             override_until: None,
@@ -197,6 +203,7 @@ mod tests {
             now,
             pause_until: None,
             sensor_level: None,
+            cloud_cover: None,
         }
     }
 
@@ -289,6 +296,24 @@ mod tests {
         assert_eq!(
             step(&mut st, &c, (0, 100), 30).write,
             Some((80, Reason::Sensor))
+        );
+    }
+
+    #[test]
+    fn clouds_lower_the_day_level_but_not_the_sensor() {
+        let a = auto();
+        let noon = DAY0 + 10 * 3600;
+        let mut c = ctx(&a, noon);
+        c.cloud_cover = Some(100);
+        let mut st = MonitorState::default();
+        let s = step(&mut st, &c, (0, 100), 50);
+        assert_eq!(s.write, Some((56, Reason::Solar))); // 80 * 0.7
+        // Sensor mode wins: the sensor already measures the real light.
+        c.sensor_level = Some(70.0);
+        let mut st = MonitorState::default();
+        assert_eq!(
+            step(&mut st, &c, (0, 100), 50).write,
+            Some((70, Reason::Sensor))
         );
     }
 

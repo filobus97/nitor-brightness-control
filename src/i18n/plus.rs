@@ -13,6 +13,12 @@ pub enum PlusKey {
     /// Note under the two level sliders.
     AutoLevelsNote,
     AutoSensor,
+    AutoWeather,
+    AutoWeatherHint,
+    /// `{}` twice: the time (HH:MM) and the cloud cover in percent.
+    AutoWeatherOk,
+    /// `{}` is the error.
+    AutoWeatherFailed,
     AutoAdaptiveTitle,
     AutoAdaptiveNote,
     AutoAdaptiveBtn,
@@ -55,6 +61,10 @@ pub const ALL: &[PlusKey] = &[
     PlusKey::AutoNight,
     PlusKey::AutoLevelsNote,
     PlusKey::AutoSensor,
+    PlusKey::AutoWeather,
+    PlusKey::AutoWeatherHint,
+    PlusKey::AutoWeatherOk,
+    PlusKey::AutoWeatherFailed,
     PlusKey::AutoAdaptiveTitle,
     PlusKey::AutoAdaptiveNote,
     PlusKey::AutoAdaptiveBtn,
@@ -99,6 +109,12 @@ pub fn tr(lang: Lang, key: PlusKey) -> &'static str {
                 "Each monitor follows these levels through its Link-all calibration range."
             }
             K::AutoSensor => "Use the light sensor",
+            K::AutoWeather => "Adjust for cloudy weather (uses Open-Meteo)",
+            K::AutoWeatherHint => {
+                "Sends only your approximate location (about 10 km) every few hours"
+            }
+            K::AutoWeatherOk => "Last update: {}, cloud cover {}%",
+            K::AutoWeatherFailed => "Weather update failed: {}",
             K::AutoAdaptiveTitle => "Windows adaptive brightness",
             K::AutoAdaptiveNote => {
                 "Windows also adjusts the built-in display automatically; turn one off to avoid conflicts."
@@ -143,6 +159,12 @@ pub fn tr(lang: Lang, key: PlusKey) -> &'static str {
                 "Ogni monitor segue questi livelli nel proprio intervallo di calibrazione di Collega tutti."
             }
             K::AutoSensor => "Usa il sensore di luce",
+            K::AutoWeather => "Adatta al meteo nuvoloso (usa Open-Meteo)",
+            K::AutoWeatherHint => {
+                "Invia solo la posizione approssimativa (circa 10 km) ogni poche ore"
+            }
+            K::AutoWeatherOk => "Ultimo aggiornamento: {}, nuvolosità {}%",
+            K::AutoWeatherFailed => "Aggiornamento meteo non riuscito: {}",
             K::AutoAdaptiveTitle => "Luminosità adattiva di Windows",
             K::AutoAdaptiveNote => {
                 "Windows regola automaticamente anche lo schermo integrato; disattiva uno dei due per evitare conflitti."

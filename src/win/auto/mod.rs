@@ -5,12 +5,13 @@
 //! to the planner's next wake time and re-armed after each wake (killed when nothing is
 //! scheduled). Everything else is event driven: the ambient-light sensor (WinRT event),
 //! resume/display-on/rescan (existing system notifications), settings changes,
-//! `WM_TIMECHANGE`, and one background thread per location request.
+//! `WM_TIMECHANGE`, one background thread per location request and one per (rare) weather fetch.
 
 mod adaptive;
 mod engine;
 mod location;
 mod sensor;
+mod weather;
 
 pub use adaptive::adaptive_brightness_on;
 pub use engine::{Engine, MonitorView};
@@ -26,3 +27,5 @@ pub const TIMER_SENSOR: usize = 6;
 pub const WM_APP_AUTO_SENSOR: u32 = WM_APP + 8;
 /// Posted by a location thread when its result waits.
 pub const WM_APP_AUTO_LOCATION: u32 = WM_APP + 9;
+/// Posted by the weather thread when its result waits.
+pub const WM_APP_AUTO_WEATHER: u32 = WM_APP + 10;

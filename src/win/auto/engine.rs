@@ -1,6 +1,7 @@
 //! The automation engine: per-monitor state, planning rounds, the single wake-up timer.
 
 use super::sensor::{self, Subscription, sensor_available};
+use super::weather::Weather;
 use super::{TIMER_AUTO, TIMER_SENSOR, adaptive, location};
 use crate::auto::ambient::{AmbientFilter, HOLD_SECS};
 use crate::auto::drive::{
@@ -8,6 +9,7 @@ use crate::auto::drive::{
     round_coord, step, timer_delay_ms, user_override,
 };
 use crate::auto::plan::MIN_STEP_PCT;
+use crate::auto::weather::Status as WeatherStatus;
 use crate::config::{Auto, Config, LocationSource};
 use crate::win::util::log;
 use std::collections::HashMap;
@@ -46,6 +48,7 @@ pub struct Engine {
     location_try: i64,
     location_busy: bool,
     adaptive_logged: bool,
+    weather: Weather,
 }
 
 impl Engine {
@@ -62,6 +65,7 @@ impl Engine {
             location_try: 0,
             location_busy: false,
             adaptive_logged: false,
+            weather: Weather::new(hwnd.0 as isize),
         }
     }
 
@@ -112,6 +116,7 @@ impl Engine {
         let auto = &cfg.auto;
         self.sync_sensor(auto, now);
         self.sync_location(auto, now);
+        self.weather.sync(auto, now);
         if !auto.enabled {
             self.arm(None, now);
             return Vec::new();
@@ -131,6 +136,7 @@ impl Engine {
             now,
             pause_until: self.pause_until,
             sensor_level: self.sensor_level,
+            cloud_cover: self.weather.cover(now),
         };
         let mut writes = Vec::new();
         let mut wake = None;
@@ -146,6 +152,12 @@ impl Engine {
                 ));
                 writes.push((v.index, value));
             }
+        }
+        // A fetch is always due on time; a change of the forecast matters for planning
+        // only without the sensor, which measures the real light and takes precedence.
+        wake = earliest(wake, self.weather.next_fetch());
+        if self.sensor_level.is_none() {
+            wake = earliest(wake, self.weather.next_cover_change(now));
         }
         self.arm(wake, now);
         writes
@@ -246,6 +258,18 @@ impl Engine {
             let _ = KillTimer(Some(self.hwnd()), TIMER_SENSOR);
         }
         self.last_lux.is_some_and(|lux| self.feed(lux, now_unix()))
+    }
+
+    // --- weather ----------------------------------------------------------
+
+    /// A weather result arrived (`WM_APP_AUTO_WEATHER`); the caller plans again.
+    pub fn on_weather(&mut self) {
+        self.weather.on_result(now_unix());
+    }
+
+    /// What the Settings window shows about the last weather fetch.
+    pub fn weather_status(&self) -> WeatherStatus {
+        self.weather.status()
     }
 
     // --- location ---------------------------------------------------------
