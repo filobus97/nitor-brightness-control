@@ -107,4 +107,5 @@ jobs:
           case "$TAG" in *-*) prerelease="--prerelease" ;; esac
           # Creates the tag on this commit when it doesn't exist yet (manual run).
           gh release create "$TAG" *.exe SHA256SUMS.txt --target "$GITHUB_SHA" \
-            --repo "$GITHUB_REPOSITORY" --title "Nitor $TAG" --generate-notes $prerelease
+            --repo "$GITHUB_REPOSITORY" --title "Nitor $TAG" --generate-notes $prerelease \
+            --notes "**Download:** \`Nitor-x64.exe\` for most PCs (Intel/AMD) · \`Nitor-arm64.exe\` for ARM PCs (Snapdragon). Not sure? Settings → System → About → System type."

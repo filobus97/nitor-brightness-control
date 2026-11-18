@@ -13,7 +13,12 @@ It's a single portable `.exe` that sits in the notification area with **one tray
 
 ## Download
 
-Get `Nitor-x64.exe` (or `Nitor-arm64.exe`) from the [Releases](https://github.com/filobus97/nitor-brightness-controll/releases) page, put it in any folder and run it. The binary isn't code-signed yet, so Windows SmartScreen may warn on first launch ("More info" → "Run anyway").
+Get the exe for your processor from the [Releases](https://github.com/filobus97/nitor-brightness-controll/releases) page, put it in any folder and run it:
+
+- **`Nitor-x64.exe`**: most PCs (Intel or AMD).
+- **`Nitor-arm64.exe`**: ARM PCs only (Snapdragon, e.g. Surface Pro X, Copilot+ PCs). On an Intel/AMD PC it fails with "This app can't run on your PC".
+
+Not sure? **Settings → System → About → System type**. The binary isn't code-signed yet, so Windows SmartScreen may warn on first launch ("More info" → "Run anyway").
 
 Windows 11 hides new tray icons in the overflow menu. To keep Nitor's icons visible, drag them onto the taskbar, or turn them on in **Settings → Personalization → Taskbar → Other system tray icons**.
 
