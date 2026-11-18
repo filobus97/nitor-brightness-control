@@ -146,3 +146,32 @@ pub fn log(line: &str) {
 pub fn install_panic_hook() {
     std::panic::set_hook(Box::new(|info| log(&info.to_string())));
 }
+
+/// The exe's embedded icon (resource 1) at the system's large or small icon size;
+/// default (no icon) when the build embedded none. Shared, so never destroyed.
+pub fn app_icon(small: bool) -> windows::Win32::UI::WindowsAndMessaging::HICON {
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetSystemMetrics, HICON, IMAGE_ICON, LR_SHARED, LoadImageW, SM_CXICON, SM_CXSMICON,
+    };
+    let size = if small { SM_CXSMICON } else { SM_CXICON };
+    // SAFETY: plain resource lookup in our own module; resource IDs are passed as
+    // MAKEINTRESOURCE-style pointers, and LR_SHARED icons are owned by the system.
+    unsafe {
+        let Ok(module) = GetModuleHandleW(None) else {
+            return HICON::default();
+        };
+        let px = GetSystemMetrics(size);
+        LoadImageW(
+            Some(module.into()),
+            PCWSTR(std::ptr::without_provenance::<u16>(1)),
+            IMAGE_ICON,
+            px,
+            px,
+            LR_SHARED,
+        )
+        .map(|h: HANDLE| HICON(h.0))
+        .unwrap_or_default()
+    }
+}
