@@ -60,8 +60,12 @@ jobs:
           if-no-files-found: error
 
   release:
-    # A pushed v* tag, or "Run workflow" with "release" ticked (on main).
-    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.release && github.ref == 'refs/heads/main')
+    # Every push to main publishes v<Cargo.toml version> if that release doesn't exist yet
+    # (so releasing = bumping the version). Also: a pushed v* tag, or "Run workflow"
+    # with "release" ticked on main.
+    if: >-
+      startsWith(github.ref, 'refs/tags/v') ||
+      (github.ref == 'refs/heads/main' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.release)))
     needs: build
     runs-on: ubuntu-latest
     permissions:
@@ -77,12 +81,23 @@ jobs:
           fi
           echo "TAG=$tag" >> "$GITHUB_ENV"
 
+      - name: Skip if already released
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "$TAG is already released; nothing to do."
+            echo "SKIP=1" >> "$GITHUB_ENV"
+          fi
+
       - uses: actions/download-artifact@v4
+        if: env.SKIP != '1'
         with:
           name: nitor
           path: dist
 
       - name: Publish release
+        if: env.SKIP != '1'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
