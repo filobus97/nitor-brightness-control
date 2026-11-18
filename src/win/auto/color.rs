@@ -115,7 +115,7 @@ impl ColorEngine {
     /// monitors wait for the final value (their gains live in an EEPROM).
     pub fn preview(&mut self, views: &[ColorView], kelvin: u32) {
         for v in views {
-            self.apply(v, kelvin, true);
+            self.apply(v, kelvin, true, true);
         }
     }
 
@@ -127,8 +127,15 @@ impl ColorEngine {
 
     /// One planning round: bring every display to the manual temperature (flyout), or the
     /// planned one, or back to neutral while color automation is off or paused
-    /// (`pause_until`), and re-arm the timer.
-    pub fn plan(&mut self, cfg: &Config, views: &[ColorView], pause_until: Option<i64>) {
+    /// (`pause_until`), and re-arm the timer. `user`: the round follows a change the user made
+    /// (flyout, Settings), so monitors take it at once instead of at the EEPROM-friendly pace.
+    pub fn plan(
+        &mut self,
+        cfg: &Config,
+        views: &[ColorView],
+        pause_until: Option<i64>,
+        user: bool,
+    ) {
         let now = now_unix();
         let a = &cfg.auto;
         self.extended = a.experimental_warm && gamma_range_extended();
@@ -147,7 +154,7 @@ impl ColorEngine {
         if let Some((k, until)) = manual {
             self.current = k;
             for v in views {
-                self.apply(v, k, false);
+                self.apply(v, k, false, user);
             }
             self.arm(until, now);
             return;
@@ -178,7 +185,7 @@ impl ColorEngine {
         if let Some(k) = self.kelvin {
             self.current = k.round() as u32;
             for v in views {
-                self.apply(v, self.current, false);
+                self.apply(v, self.current, false, user);
             }
         }
         self.arm(Some(p.next_wake_unix), now);
@@ -186,7 +193,7 @@ impl ColorEngine {
 
     /// Give `v` the temperature `kelvin` by its method, deciding the method first. With
     /// `live` (a drag in progress) only gamma ramps are written.
-    fn apply(&mut self, v: &ColorView, kelvin: u32, live: bool) {
+    fn apply(&mut self, v: &ColorView, kelvin: u32, live: bool, user: bool) {
         let extended = self.extended;
         let unsupported = self.unsupported.contains(v.id);
         let d = self.displays.entry(v.id.to_string()).or_default();
@@ -229,8 +236,12 @@ impl ColorEngine {
                         log(&format!("color id={} probing DDC gains", v.id));
                     }
                     d.shown = Some(kelvin);
-                    w.set_color(ColorRequest::Apply(kelvin));
-                    log(&format!("color id={} {kelvin}K ddc requested", v.id));
+                    w.set_color(ColorRequest::Apply { kelvin, user });
+                    log(&format!(
+                        "color id={} {kelvin}K ddc requested ({})",
+                        v.id,
+                        if user { "user" } else { "auto" }
+                    ));
                 }
             }
         }
@@ -255,6 +266,33 @@ impl ColorEngine {
             log(&format!("color id={id} DDC gains unavailable, using gamma"));
             true
         }
+    }
+
+    /// The user picked Hardware for monitor `id`: forget an earlier failure of this session
+    /// so the monitor is tried again.
+    pub fn select_hardware(&mut self, id: &str, ddc: Option<&DdcWorker>) {
+        if self.unsupported.remove(id) {
+            if let Some(w) = ddc {
+                w.retry_color();
+            }
+            log(&format!("color id={id} hardware chosen again, retrying"));
+        }
+    }
+
+    /// "Restore monitor colors": the worker writes the saved original gains (or equal
+    /// values) at once, and the monitor goes on with software color; the caller sets that
+    /// method in the config.
+    pub fn restore_monitor(&mut self, id: &str, ddc: Option<&DdcWorker>) {
+        if let Some(w) = ddc {
+            w.set_color(ColorRequest::Reset);
+        }
+        // The worker's restore is the old method's cleanup: `apply` must not queue another.
+        if let Some(d) = self.displays.get_mut(id) {
+            (d.pref, d.method, d.shown) = (Some(ColorMethodPref::Gamma), None, None);
+        }
+        log(&format!(
+            "color id={id} monitor colors restored by the user"
+        ));
     }
 
     /// Back to neutral (6500 K) on every display that was changed; idempotent.

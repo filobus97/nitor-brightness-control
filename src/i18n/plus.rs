@@ -29,6 +29,9 @@ pub enum PlusKey {
     ColorSegSoftware,
     /// Note under the Hardware choice.
     ColorHwNote,
+    /// The "Restore monitor colors" button and the note above it.
+    ColorRestoreNote,
+    ColorRestoreBtn,
     AutoEnabled,
     AutoEnabledHint,
     AutoDay,
@@ -96,6 +99,8 @@ pub const ALL: &[PlusKey] = &[
     PlusKey::ColorSegHardware,
     PlusKey::ColorSegSoftware,
     PlusKey::ColorHwNote,
+    PlusKey::ColorRestoreNote,
+    PlusKey::ColorRestoreBtn,
     PlusKey::AutoEnabled,
     PlusKey::AutoEnabledHint,
     PlusKey::AutoDay,
@@ -162,6 +167,10 @@ pub fn tr(lang: Lang, key: PlusKey) -> &'static str {
             K::ColorSegHardware => "Hardware",
             K::ColorSegSoftware => "Software",
             K::ColorHwNote => "Most monitors apply this only in their User/Custom color mode",
+            K::ColorRestoreNote => {
+                "Puts the monitor's original RGB gains back (saved when Hardware was first used) and switches to Software."
+            }
+            K::ColorRestoreBtn => "Restore monitor colors",
             K::AutoEnabled => "Automatic brightness",
             K::AutoEnabledHint => "Follows sunrise and sunset at your location.",
             K::AutoDay => "Day level",
@@ -236,6 +245,10 @@ pub fn tr(lang: Lang, key: PlusKey) -> &'static str {
             K::ColorHwNote => {
                 "La maggior parte dei monitor lo applica solo nella modalità colore Utente/Personalizzata"
             }
+            K::ColorRestoreNote => {
+                "Rimette i guadagni RGB originali del monitor (salvati al primo uso di Hardware) e passa a Software."
+            }
+            K::ColorRestoreBtn => "Ripristina i colori del monitor",
             K::AutoEnabled => "Luminosità automatica",
             K::AutoEnabledHint => "Segue alba e tramonto nella tua posizione.",
             K::AutoDay => "Livello diurno",

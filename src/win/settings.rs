@@ -160,6 +160,9 @@ pub enum MonitorEdit {
     /// Plus: how its color temperature is set.
     #[cfg(feature = "plus")]
     ColorMethod(crate::config::ColorMethodPref),
+    /// Plus: write the monitor's original gains back and use Software color.
+    #[cfg(feature = "plus")]
+    RestoreColors,
     MoveUp,
     MoveDown,
 }

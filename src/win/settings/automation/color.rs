@@ -21,6 +21,8 @@ pub(in crate::win::settings) enum ColorCtl {
     NightLight,
     /// Monitor `i`'s method choice.
     Method(usize, ColorMethodPref),
+    /// "Restore monitor colors" for monitor `i`.
+    Restore(usize),
 }
 
 fn ctl(c: ColorCtl) -> Ctl {
@@ -81,6 +83,8 @@ impl State {
             self.note_row(b, self.method_caption(i));
             if pref == ColorMethodPref::Ddc {
                 self.note_row(b, self.pt(K::ColorHwNote));
+                self.note_row(b, self.pt(K::ColorRestoreNote));
+                self.color_button_row(b, ColorCtl::Restore(i));
             }
         }
         b.end_card(SECTION_GAP);
@@ -134,10 +138,10 @@ impl State {
     }
 
     fn color_btn_label(&self, c: ColorCtl) -> String {
-        self.pt(if c == ColorCtl::WarmRange {
-            PlusKey::ColorWarmBtn
-        } else {
-            PlusKey::ColorNightLightBtn
+        self.pt(match c {
+            ColorCtl::WarmRange => PlusKey::ColorWarmBtn,
+            ColorCtl::Restore(_) => PlusKey::ColorRestoreBtn,
+            _ => PlusKey::ColorNightLightBtn,
         })
     }
 
@@ -174,6 +178,10 @@ impl State {
                 return (self.method_pref(i) != pref)
                     .then_some(Action::Monitor(id, MonitorEdit::ColorMethod(pref)));
             }
+            ColorCtl::Restore(i) => {
+                let id = self.snap.monitors.get(i)?.id.clone();
+                return Some(Action::Monitor(id, MonitorEdit::RestoreColors));
+            }
         };
         Some(Action::Auto(edit))
     }
@@ -206,7 +214,7 @@ impl State {
                 let pressed = self.drag == Some(Drag::Level(AutoCtl::Color(c)));
                 cv.slider(r, (0.0, frac), false, self.theme.accent, (hot, pressed));
             }
-            ColorCtl::WarmRange | ColorCtl::NightLight => {
+            ColorCtl::WarmRange | ColorCtl::NightLight | ColorCtl::Restore(_) => {
                 self.draw_button(cv, r, &self.color_btn_label(c), hot)
             }
             ColorCtl::Method(i, pref) => self.draw_segment(

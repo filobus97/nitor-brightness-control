@@ -2,6 +2,7 @@
 
 use super::curve::DayCurve;
 use crate::config::Auto;
+use std::time::{Duration, Instant};
 
 /// Coldest and warmest supported temperatures (kelvin).
 pub const MIN_K: u32 = 1000;
@@ -23,6 +24,66 @@ pub fn ui_steps(min_k: u32) -> u8 {
 pub const MIN_DELTA_K: f32 = 100.0;
 /// A DDC monitor's gains are written at most this often (seconds): they live in its EEPROM.
 pub const DDC_MIN_INTERVAL_SECS: u64 = 300;
+/// A change the user asked for waits only this long after the previous gain write
+/// (milliseconds), which coalesces a burst of wheel or key steps.
+pub const DDC_USER_GUARD_MS: u64 = 1000;
+
+/// Earliest instant the next gain write may happen, given when the last one did: an
+/// automatic step keeps the EEPROM minimum, a user's change only the short guard.
+pub fn next_write_at(last_write: Option<Instant>, user: bool) -> Option<Instant> {
+    let wait = if user {
+        Duration::from_millis(DDC_USER_GUARD_MS)
+    } else {
+        Duration::from_secs(DDC_MIN_INTERVAL_SECS)
+    };
+    last_write.map(|t| t + wait)
+}
+
+/// The monitor's own video gains before Nitor ever changed them, with their maxima.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GainBaseline {
+    pub original: [u32; 3],
+    pub max: [u32; 3],
+}
+
+impl GainBaseline {
+    /// Usable for a monitor reporting `max`: same scale and no value above it.
+    fn valid_for(&self, max: [u32; 3]) -> bool {
+        self.max == max && self.original.iter().zip(max).all(|(&o, m)| o <= m)
+    }
+}
+
+/// The baseline to scale from after a probe that read `read` (maxima `max`): the stored one
+/// if it fits this monitor, else the values just read. The flag says the baseline is new
+/// and must be stored.
+pub fn choose_baseline(
+    stored: Option<GainBaseline>,
+    read: [u32; 3],
+    max: [u32; 3],
+) -> (GainBaseline, bool) {
+    match stored.filter(|b| b.valid_for(max)) {
+        Some(b) => (b, false),
+        None => (
+            GainBaseline {
+                original: read,
+                max,
+            },
+            true,
+        ),
+    }
+}
+
+/// What the "Restore monitor colors" button writes: the stored originals if they fit, else
+/// equal values (the highest of the three current readings, within each channel's maximum).
+pub fn restore_targets(stored: Option<GainBaseline>, read: [u32; 3], max: [u32; 3]) -> [u32; 3] {
+    match stored.filter(|b| b.valid_for(max)) {
+        Some(b) => b.original,
+        None => {
+            let top = read.into_iter().max().unwrap_or(0);
+            max.map(|m| top.min(m))
+        }
+    }
+}
 
 /// True when `kelvin` needs the experimental extended gamma range.
 pub fn needs_experimental_warm(kelvin: u32) -> bool {
@@ -220,6 +281,81 @@ mod tests {
         assert_eq!(gain_target(80, 100, 2.0), 80);
         // A monitor whose gain already exceeds the reported maximum is never raised.
         assert_eq!(gain_target(120, 100, 1.0), 120);
+    }
+
+    #[test]
+    fn user_changes_skip_the_eeprom_wait() {
+        let t = Instant::now();
+        assert_eq!(next_write_at(None, false), None);
+        assert_eq!(next_write_at(None, true), None);
+        assert_eq!(
+            next_write_at(Some(t), false),
+            Some(t + Duration::from_secs(DDC_MIN_INTERVAL_SECS))
+        );
+        assert_eq!(
+            next_write_at(Some(t), true),
+            Some(t + Duration::from_millis(DDC_USER_GUARD_MS))
+        );
+    }
+
+    #[test]
+    fn baseline_prefers_stored_originals() {
+        let stored = GainBaseline {
+            original: [100, 100, 100],
+            max: [100; 3],
+        };
+        // Drifted readings never replace a stored baseline of the same scale.
+        assert_eq!(
+            choose_baseline(Some(stored), [100, 99, 99], [100; 3]),
+            (stored, false)
+        );
+        let fresh = GainBaseline {
+            original: [100, 92, 88],
+            max: [100; 3],
+        };
+        assert_eq!(
+            choose_baseline(None, [100, 92, 88], [100; 3]),
+            (fresh, true)
+        );
+        // A different scale (or an impossible value) is ignored and stored again.
+        assert_eq!(
+            choose_baseline(Some(stored), [200, 190, 180], [255; 3]),
+            (
+                GainBaseline {
+                    original: [200, 190, 180],
+                    max: [255; 3]
+                },
+                true
+            )
+        );
+        let bad = GainBaseline {
+            original: [120, 100, 100],
+            max: [100; 3],
+        };
+        assert!(choose_baseline(Some(bad), [90, 90, 90], [100; 3]).1);
+    }
+
+    #[test]
+    fn restore_targets_stored_or_equal() {
+        let stored = GainBaseline {
+            original: [100, 98, 97],
+            max: [100; 3],
+        };
+        assert_eq!(
+            restore_targets(Some(stored), [100, 79, 66], [100; 3]),
+            [100, 98, 97]
+        );
+        assert_eq!(restore_targets(None, [100, 79, 66], [100; 3]), [100; 3]);
+        assert_eq!(restore_targets(None, [100, 99, 99], [100; 3]), [100; 3]);
+        // Capped at the channel maximum; a stored set of another scale is ignored.
+        assert_eq!(
+            restore_targets(None, [120, 90, 80], [100, 110, 100]),
+            [100, 110, 100]
+        );
+        assert_eq!(
+            restore_targets(Some(stored), [50, 60, 70], [255; 3]),
+            [70; 3]
+        );
     }
 
     #[test]
