@@ -6,7 +6,10 @@ use super::monitors::PhysicalHandle;
 use super::util::log;
 use super::wmi::Wmi;
 #[cfg(feature = "plus")]
-use crate::auto::color::{DDC_MIN_INTERVAL_SECS, gain_target, gains_match, rgb_multipliers};
+use crate::auto::color::{
+    GainBaseline, choose_baseline, gain_target, gains_match, next_write_at, restore_targets,
+    rgb_multipliers,
+};
 use crate::throttle::{WriteThrottle, percent_to_raw, raw_to_percent};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -24,8 +27,9 @@ pub enum DdcEvent {
     /// Reads work but writes are rejected (game/HDR preset, driver lock).
     ReadOnly,
     /// Plus: the monitor answered to the red, green and blue video gains (colour by hardware).
+    /// Carries the baseline when it is new and must be saved in the config.
     #[cfg(feature = "plus")]
-    GainsReady,
+    GainsReady(Option<GainBaseline>),
     /// Plus: the video gains are missing or rejected; colour must use gamma ramps.
     #[cfg(feature = "plus")]
     GainsUnavailable,
@@ -57,10 +61,14 @@ struct State {
 #[cfg(feature = "plus")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ColorRequest {
-    /// Scale the original gains to this colour temperature (kelvin).
-    Apply(u32),
+    /// Scale the original gains to this colour temperature (kelvin). A `user` change (flyout,
+    /// Settings) skips the 5-minute EEPROM wait; an automatic step keeps it.
+    Apply { kelvin: u32, user: bool },
     /// Put the original gains back, immediately.
     Restore,
+    /// The "Restore monitor colors" button: write the saved originals (or equal values),
+    /// whatever the probe found, immediately.
+    Reset,
 }
 
 /// Video-gain channels of a monitor, known after the probe.
@@ -83,8 +91,10 @@ struct ColorSlot {
     modified: bool,
     /// A write failed: no more colour writes, only the restore.
     broken: bool,
-    /// EEPROM protection: no gain write before this instant.
-    next_write: Option<Instant>,
+    /// When the gains were last written (EEPROM protection, see `next_write_at`).
+    last_write: Option<Instant>,
+    /// The originals saved in the config (or captured by the first probe).
+    stored: Option<GainBaseline>,
 }
 
 #[cfg(feature = "plus")]
@@ -102,8 +112,12 @@ impl State {
         let Some(request) = c.request else {
             return ColorStep::Idle;
         };
+        if request == ColorRequest::Reset {
+            c.request = None;
+            return ColorStep::Do(Action::Reset(c.stored));
+        }
         let Gains::Ready { original, max } = c.gains else {
-            if matches!(c.gains, Gains::Untried) && matches!(request, ColorRequest::Apply(_)) {
+            if matches!(c.gains, Gains::Untried) && matches!(request, ColorRequest::Apply { .. }) {
                 return ColorStep::Do(Action::Probe);
             }
             c.request = None;
@@ -117,19 +131,21 @@ impl State {
                         targets: original,
                         original,
                         kelvin: None,
+                        reason: "restore",
                     })
                 } else {
                     ColorStep::Idle
                 }
             }
-            ColorRequest::Apply(kelvin) => {
+            ColorRequest::Reset => ColorStep::Idle,
+            ColorRequest::Apply { kelvin, user } => {
                 let mult = rgb_multipliers(kelvin);
                 let targets = [0, 1, 2].map(|i| gain_target(original[i], max[i], mult[i]));
                 if c.broken || targets == c.current {
                     c.request = None;
                     return ColorStep::Idle;
                 }
-                match c.next_write.filter(|&t| t > now) {
+                match next_write_at(c.last_write, user).filter(|&t| t > now) {
                     Some(t) => ColorStep::WaitUntil(t),
                     None => {
                         c.request = None;
@@ -137,6 +153,7 @@ impl State {
                             targets,
                             original,
                             kelvin: Some(kelvin),
+                            reason: if user { "user" } else { "auto" },
                         })
                     }
                 }
@@ -188,7 +205,8 @@ impl DdcWorker {
                     current: [0; 3],
                     modified: false,
                     broken: false,
-                    next_write: None,
+                    last_write: None,
+                    stored: None,
                 },
             }),
             Condvar::new(),
@@ -231,6 +249,24 @@ impl DdcWorker {
     #[cfg(feature = "plus")]
     pub fn set_color(&self, request: ColorRequest) {
         lock(&self.shared.0).color.request = Some(request);
+        self.shared.1.notify_all();
+    }
+
+    /// Plus: tell the worker the originals saved in the config (before its first probe).
+    #[cfg(feature = "plus")]
+    pub fn set_baseline(&self, stored: Option<GainBaseline>) {
+        lock(&self.shared.0).color.stored = stored;
+    }
+
+    /// Plus: forget a failed hardware attempt (the user picked Hardware again): the next
+    /// colour request probes the monitor afresh.
+    #[cfg(feature = "plus")]
+    pub fn retry_color(&self) {
+        {
+            let mut st = lock(&self.shared.0);
+            st.color.gains = Gains::Untried;
+            st.color.broken = false;
+        }
         self.shared.1.notify_all();
     }
 
@@ -277,13 +313,18 @@ enum Action {
     /// Plus: read the three video gains.
     #[cfg(feature = "plus")]
     Probe,
-    /// Plus: bring the gains to `targets` (`kelvin`: the temperature, `None` for a restore).
+    /// Plus: bring the gains to `targets` (`kelvin`: the temperature, `None` for a restore;
+    /// `reason`: auto, user or restore, for the log).
     #[cfg(feature = "plus")]
     Gains {
         targets: [u32; 3],
         original: [u32; 3],
         kelvin: Option<u32>,
+        reason: &'static str,
     },
+    /// Plus: the "Restore monitor colors" button, with the saved originals if any.
+    #[cfg(feature = "plus")]
+    Reset(Option<GainBaseline>),
 }
 
 /// Block until there is something to do; `None` means stop.
@@ -375,6 +416,20 @@ impl Panel {
         Some((cur, max))
     }
 
+    /// Plus: write the channels that differ between `from` and `to`; false at the first failure.
+    #[cfg(feature = "plus")]
+    fn write_gains(&self, from: [u32; 3], to: [u32; 3]) -> bool {
+        // Only a channel that really changes is written (EEPROM).
+        (0..3).all(|i| to[i] == from[i] || self.write_gain(i, to[i]))
+    }
+
+    /// Plus: write all three channels, and all three once more if any failed.
+    #[cfg(feature = "plus")]
+    fn write_all_gains(&self, values: [u32; 3]) -> bool {
+        let pass = || [0, 1, 2].map(|i| self.write_gain(i, values[i])) == [true; 3];
+        pass() || pass()
+    }
+
     /// Plus: one write of video gain `channel` with one retry.
     #[cfg(feature = "plus")]
     fn write_gain(&self, channel: usize, raw: u32) -> bool {
@@ -446,76 +501,107 @@ fn run(key: u64, backend: Backend, shared: Shared, notify: Notify) {
             #[cfg(feature = "plus")]
             Action::Probe => {
                 let found = panel.read_gains();
-                {
+                let event = {
                     let mut st = lock(&shared.0);
-                    st.color.gains = match found {
-                        Some((original, max)) => {
-                            st.color.current = original;
-                            Gains::Ready { original, max }
+                    match found {
+                        Some((read, max)) => {
+                            // The saved originals, not what the monitor shows now, are the
+                            // baseline: earlier writes must not become the new "original".
+                            let (base, fresh) = choose_baseline(st.color.stored, read, max);
+                            st.color.stored = Some(base);
+                            st.color.gains = Gains::Ready {
+                                original: base.original,
+                                max,
+                            };
+                            st.color.current = read;
+                            st.color.modified = read != base.original;
+                            log(&format!(
+                                "color ddc key={key} read {read:?}, originals {:?} ({})",
+                                base.original,
+                                if fresh { "new" } else { "saved" }
+                            ));
+                            DdcEvent::GainsReady(fresh.then_some(base))
                         }
-                        None => Gains::Unavailable,
-                    };
-                }
-                notify(
-                    key,
-                    if found.is_some() {
-                        DdcEvent::GainsReady
-                    } else {
-                        DdcEvent::GainsUnavailable
-                    },
-                );
+                        None => {
+                            st.color.gains = Gains::Unavailable;
+                            DdcEvent::GainsUnavailable
+                        }
+                    }
+                };
+                notify(key, event);
             }
             #[cfg(feature = "plus")]
             Action::Gains {
                 targets,
                 original,
                 kelvin,
+                reason,
             } => {
-                let mut now_vals = lock(&shared.0).color.current;
-                let mut ok = true;
-                for (i, &target) in targets.iter().enumerate() {
-                    // Only a channel that really changes is written (EEPROM).
-                    if target != now_vals[i] {
-                        ok = panel.write_gain(i, target);
-                        if !ok {
-                            break;
-                        }
-                        now_vals[i] = target;
-                    }
-                }
+                let current = lock(&shared.0).color.current;
+                // What the monitor holds now; `None` when a write failed and it is unknown.
+                let mut now_vals = panel.write_gains(current, targets).then_some(targets);
+                let mut ok = now_vals.is_some();
                 // Many monitors answer the gain reads but ignore the writes (outside their
                 // User/Custom color mode): read the gains back, they must be what was written.
                 if ok && kelvin.is_some() {
                     std::thread::sleep(RETRY_DELAY);
                     let back = panel.read_gains().map(|(cur, _)| cur);
-                    if !back.is_some_and(|b| gains_match(b, now_vals)) {
+                    if !back.is_some_and(|b| gains_match(b, targets)) {
                         log(&format!(
-                            "color ddc key={key} wrote {now_vals:?}, read back {back:?}: not applied"
+                            "color ddc key={key} wrote {targets:?}, read back {back:?}: not applied"
                         ));
-                        // What the monitor really holds, so the restore writes only what differs.
-                        now_vals = back.unwrap_or(now_vals);
-                        ok = false;
+                        (now_vals, ok) = (back, false);
                     }
+                }
+                // A failed colour write never leaves a partial set: all originals go back.
+                if !ok && kelvin.is_some() && panel.write_all_gains(original) {
+                    now_vals = Some(original);
                 }
                 {
                     let mut st = lock(&shared.0);
-                    st.color.current = now_vals;
-                    st.color.modified = now_vals != original;
-                    st.color.next_write =
-                        Some(Instant::now() + Duration::from_secs(DDC_MIN_INTERVAL_SECS));
-                    // A failed colour write puts the original gains back (not retried).
+                    // `u32::MAX`: unknown, so the next restore writes every channel.
+                    st.color.current = now_vals.unwrap_or([u32::MAX; 3]);
+                    st.color.modified = now_vals != Some(original);
+                    st.color.last_write = Some(Instant::now());
                     if !ok && kelvin.is_some() {
                         st.color.broken = true;
-                        st.color.request = Some(ColorRequest::Restore);
+                        if st.color.modified {
+                            st.color.request = Some(ColorRequest::Restore);
+                        }
                     }
                 }
                 log(&format!(
-                    "color ddc key={key} kelvin={kelvin:?} gains={now_vals:?} ok={ok}"
+                    "color ddc key={key} reason={reason} kelvin={kelvin:?} gains={now_vals:?} ok={ok}"
                 ));
                 if !ok && kelvin.is_some() {
                     notify(key, DdcEvent::GainsUnavailable);
                 }
                 // Wakes `wait_color_restored`.
+                shared.1.notify_all();
+            }
+            #[cfg(feature = "plus")]
+            Action::Reset(stored) => {
+                let done = panel.read_gains().map(|(read, max)| {
+                    let to = restore_targets(stored, read, max);
+                    let ok = panel.write_gains(read, to) || panel.write_all_gains(to);
+                    (to, ok)
+                });
+                {
+                    let mut st = lock(&shared.0);
+                    st.color.last_write = Some(Instant::now());
+                    if let Some((to, ok)) = done {
+                        // Unknown after a failed write: a later restore writes every channel.
+                        let known = ok.then_some(to);
+                        st.color.current = known.unwrap_or([u32::MAX; 3]);
+                        st.color.modified = match st.color.gains {
+                            Gains::Ready { original, .. } => known != Some(original),
+                            _ => false,
+                        };
+                    }
+                }
+                log(&format!(
+                    "color ddc key={key} reason=restore reset {done:?}"
+                ));
                 shared.1.notify_all();
             }
             Action::Write(raw, max) => {

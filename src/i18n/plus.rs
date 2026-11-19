@@ -23,12 +23,14 @@ pub enum PlusKey {
     ColorMethodGamma,
     ColorMethodHdr,
     ColorMethodUnsupported,
-    /// The choices Auto / Hardware / Software.
-    ColorSegAuto,
+    /// The choices Software / Hardware.
     ColorSegHardware,
     ColorSegSoftware,
     /// Note under the Hardware choice.
     ColorHwNote,
+    /// The "Restore monitor colors" button and the note above it.
+    ColorRestoreNote,
+    ColorRestoreBtn,
     AutoEnabled,
     AutoEnabledHint,
     AutoDay,
@@ -92,10 +94,11 @@ pub const ALL: &[PlusKey] = &[
     PlusKey::ColorMethodGamma,
     PlusKey::ColorMethodHdr,
     PlusKey::ColorMethodUnsupported,
-    PlusKey::ColorSegAuto,
     PlusKey::ColorSegHardware,
     PlusKey::ColorSegSoftware,
     PlusKey::ColorHwNote,
+    PlusKey::ColorRestoreNote,
+    PlusKey::ColorRestoreBtn,
     PlusKey::AutoEnabled,
     PlusKey::AutoEnabledHint,
     PlusKey::AutoDay,
@@ -141,10 +144,10 @@ pub fn tr(lang: Lang, key: PlusKey) -> &'static str {
         Lang::En => match key {
             K::SecAutomation => "Automation",
             K::SecLocation => "Location",
-            K::SecColor => "Color temperature (experimental)",
+            K::SecColor => "Color temperature",
             K::FlyoutColor => "Color temperature",
             K::ColorEnabled => "Automatic color temperature",
-            K::ColorEnabledHint => "Warmer light after sunset, like f.lux.",
+            K::ColorEnabledHint => "Warmer light after sunset.",
             K::ColorDay => "Day temperature",
             K::ColorNight => "Night temperature",
             K::ColorWarm => "Allow warmer than 4000 K (experimental)",
@@ -158,10 +161,13 @@ pub fn tr(lang: Lang, key: PlusKey) -> &'static str {
             K::ColorMethodGamma => "Using: Software (gamma)",
             K::ColorMethodHdr => "HDR: not supported",
             K::ColorMethodUnsupported => "Hardware not supported — using Software",
-            K::ColorSegAuto => "Auto",
             K::ColorSegHardware => "Hardware",
             K::ColorSegSoftware => "Software",
             K::ColorHwNote => "Most monitors apply this only in their User/Custom color mode",
+            K::ColorRestoreNote => {
+                "Puts the monitor's original RGB gains back (saved when Hardware was first used) and switches to Software."
+            }
+            K::ColorRestoreBtn => "Restore monitor colors",
             K::AutoEnabled => "Automatic brightness",
             K::AutoEnabledHint => "Follows sunrise and sunset at your location.",
             K::AutoDay => "Day level",
@@ -211,10 +217,10 @@ pub fn tr(lang: Lang, key: PlusKey) -> &'static str {
         Lang::It => match key {
             K::SecAutomation => "Automazione",
             K::SecLocation => "Posizione",
-            K::SecColor => "Temperatura colore (sperimentale)",
+            K::SecColor => "Temperatura colore",
             K::FlyoutColor => "Temperatura colore",
             K::ColorEnabled => "Temperatura colore automatica",
-            K::ColorEnabledHint => "Luce più calda dopo il tramonto, come f.lux.",
+            K::ColorEnabledHint => "Luce più calda dopo il tramonto.",
             K::ColorDay => "Temperatura diurna",
             K::ColorNight => "Temperatura notturna",
             K::ColorWarm => "Consenti sotto 4000 K (sperimentale)",
@@ -230,12 +236,15 @@ pub fn tr(lang: Lang, key: PlusKey) -> &'static str {
             K::ColorMethodGamma => "In uso: Software (gamma)",
             K::ColorMethodHdr => "HDR: non supportato",
             K::ColorMethodUnsupported => "Hardware non supportato — uso Software",
-            K::ColorSegAuto => "Auto",
             K::ColorSegHardware => "Hardware",
             K::ColorSegSoftware => "Software",
             K::ColorHwNote => {
                 "La maggior parte dei monitor lo applica solo nella modalità colore Utente/Personalizzata"
             }
+            K::ColorRestoreNote => {
+                "Rimette i guadagni RGB originali del monitor (salvati al primo uso di Hardware) e passa a Software."
+            }
+            K::ColorRestoreBtn => "Ripristina i colori del monitor",
             K::AutoEnabled => "Luminosità automatica",
             K::AutoEnabledHint => "Segue alba e tramonto nella tua posizione.",
             K::AutoDay => "Livello diurno",

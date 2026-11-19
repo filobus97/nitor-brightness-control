@@ -79,6 +79,10 @@ pub struct MonitorSettings {
     pub hidden: bool,
     /// Plus: how its color temperature is set.
     pub color_method: ColorMethodPref,
+    /// Plus: the monitor's own red/green/blue video gains, saved the first time Hardware color
+    /// was used (`ddc_gains`), and the maxima they were read with (`ddc_gains_max`).
+    pub ddc_gains: Option<[u32; 3]>,
+    pub ddc_gains_max: Option<[u32; 3]>,
 }
 
 impl Default for MonitorSettings {
@@ -94,7 +98,9 @@ impl Default for MonitorSettings {
             link_max: 100,
             badge: None,
             hidden: false,
-            color_method: ColorMethodPref::Auto,
+            color_method: ColorMethodPref::Gamma,
+            ddc_gains: None,
+            ddc_gains_max: None,
         }
     }
 }
@@ -120,19 +126,17 @@ pub enum OverrideMode {
 pub enum ColorMethodPref {
     /// Software: a gamma ramp, which always works and never touches the monitor's memory.
     #[default]
-    Auto,
+    Gamma,
     /// RGB gains over DDC/CI, if the monitor really applies them.
     Ddc,
-    /// Software, chosen explicitly.
-    Gamma,
 }
 
 impl ColorMethodPref {
     fn parse(v: &str) -> ColorMethodPref {
         match v.trim().to_ascii_lowercase().as_str() {
             "ddc" | "hardware" => ColorMethodPref::Ddc,
-            "gamma" | "software" => ColorMethodPref::Gamma,
-            _ => ColorMethodPref::Auto,
+            // "gamma", "software", the retired "auto" and anything else.
+            _ => ColorMethodPref::Gamma,
         }
     }
 }
@@ -351,10 +355,15 @@ impl Config {
                 o += "hidden = true\n";
             }
             match m.color_method {
-                ColorMethodPref::Auto => {}
-                ColorMethodPref::Ddc => o += "color_method = ddc          ; auto | ddc | gamma\n",
-                ColorMethodPref::Gamma => {
-                    o += "color_method = gamma          ; auto | ddc | gamma\n"
+                ColorMethodPref::Ddc => o += "color_method = ddc          ; gamma | ddc\n",
+                ColorMethodPref::Gamma => o += "color_method = gamma        ; gamma | ddc\n",
+            }
+            for (key, gains) in [
+                ("ddc_gains", m.ddc_gains),
+                ("ddc_gains_max", m.ddc_gains_max),
+            ] {
+                if let Some([r, g, b]) = gains {
+                    o += &format!("{key} = {r},{g},{b}\n");
                 }
             }
         }
@@ -545,6 +554,8 @@ impl MonitorSettings {
             "badge" => self.badge = v.chars().next(),
             "hidden" => self.hidden = parse_bool(v, false),
             "color_method" => self.color_method = ColorMethodPref::parse(v),
+            "ddc_gains" => self.ddc_gains = parse_gains(v),
+            "ddc_gains_max" => self.ddc_gains_max = parse_gains(v),
             _ => return,
         }
         if self.min > self.max {
@@ -554,6 +565,13 @@ impl MonitorSettings {
             std::mem::swap(&mut self.link_min, &mut self.link_max);
         }
     }
+}
+
+/// Three video-gain values, `R,G,B` (spaces allowed); `None` unless exactly three numbers.
+fn parse_gains(v: &str) -> Option<[u32; 3]> {
+    let mut it = v.split(',').map(|p| p.trim().parse::<u32>().ok());
+    let gains = [it.next()??, it.next()??, it.next()??];
+    it.next().is_none().then_some(gains)
 }
 
 /// Resolve the config path: explicit CLI path; else an existing `Nitor.ini` in `exe_dir`;
@@ -636,6 +654,8 @@ mod tests {
                 badge: Some('D'),
                 hidden: true,
                 color_method: ColorMethodPref::Ddc,
+                ddc_gains: Some([100, 92, 88]),
+                ddc_gains_max: Some([100, 100, 100]),
             },
         );
         c.monitors
@@ -734,18 +754,35 @@ mod tests {
         assert_eq!(c.general.tray_style, TrayStyle::Text);
         assert_eq!(c.monitors["M"].color, None);
         assert_eq!(c.monitors["M"].max, 100);
-        assert_eq!(c.monitors["M"].color_method, ColorMethodPref::Auto);
+        assert_eq!(c.monitors["M"].color_method, ColorMethodPref::Gamma);
         for (text, want) in [
             ("DDC", ColorMethodPref::Ddc),
             ("hardware", ColorMethodPref::Ddc),
             (" Gamma ", ColorMethodPref::Gamma),
             ("software", ColorMethodPref::Gamma),
-            ("auto", ColorMethodPref::Auto),
-            ("???", ColorMethodPref::Auto),
+            ("auto", ColorMethodPref::Gamma),
+            ("???", ColorMethodPref::Gamma),
         ] {
             let c = Config::parse(&format!("[monitor.M]\ncolor_method = {text}\n"));
             assert_eq!(c.monitors["M"].color_method, want, "{text}");
         }
+    }
+
+    #[test]
+    fn gains_parse_leniently() {
+        let gains = |v: &str| {
+            Config::parse(&format!("[monitor.M]\nddc_gains = {v}\n")).monitors["M"].ddc_gains
+        };
+        assert_eq!(gains("100,92,88"), Some([100, 92, 88]));
+        assert_eq!(gains(" 100 , 92 ,88 ; saved"), Some([100, 92, 88]));
+        for bad in ["", "1,2", "1,2,3,4", "a,b,c", "1,2,-3", "100 92 88"] {
+            assert_eq!(gains(bad), None, "{bad}");
+        }
+        let c = Config::parse("[monitor.M]\nddc_gains_max = 255,255,255\n");
+        assert_eq!(c.monitors["M"].ddc_gains_max, Some([255; 3]));
+        let mut c = Config::default();
+        c.monitors.insert("M".into(), MonitorSettings::default());
+        assert!(!c.to_ini().contains("ddc_gains"));
     }
 
     #[test]

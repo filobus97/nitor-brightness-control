@@ -22,11 +22,11 @@ use super::wheel::{self, WM_APP_WHEEL, WheelEvent};
 use super::wmi::{self, Wmi};
 use super::{autostart, util};
 #[cfg(feature = "plus")]
-use crate::auto::color::{MAX_K, UI_MIN_K, WARM_LIMIT_K};
+use crate::auto::color::{GainBaseline, MAX_K, UI_MIN_K, WARM_LIMIT_K};
 use crate::cli::{self, BrightnessOp, Command, Target};
 use crate::color::{Rgb, next_palette_color};
 #[cfg(feature = "plus")]
-use crate::config::LocationSource;
+use crate::config::{ColorMethodPref, LocationSource};
 use crate::config::{Config, MonitorSettings};
 use crate::display_id::display_key;
 use crate::i18n::{Key, Lang, tr, tr_with};
@@ -599,6 +599,10 @@ impl App {
             let key = self.next_key;
             self.next_key += 1;
             let worker = e.backend.map(|b| self.spawn_worker(key, b, interval));
+            #[cfg(feature = "plus")]
+            if let Some(w) = &worker {
+                w.set_baseline(stored_gains(&self.config, &e.row.id));
+            }
             self.monitors.push(Monitor {
                 row: e.row,
                 uid: i as u32 + 1,
@@ -658,10 +662,19 @@ impl App {
 
     fn apply_event(&mut self, i: usize, event: DdcEvent) {
         #[cfg(feature = "plus")]
-        if let DdcEvent::GainsReady | DdcEvent::GainsUnavailable = event {
-            let id = &self.monitors[i].row.id;
-            if self.color.on_gains(id, event == DdcEvent::GainsReady) {
-                self.color_replan();
+        if let DdcEvent::GainsReady(_) | DdcEvent::GainsUnavailable = event {
+            let id = self.monitors[i].row.id.clone();
+            // The first Hardware use of a monitor: keep its own gains for good.
+            if let DdcEvent::GainsReady(Some(base)) = event {
+                let s = self.config.monitors.entry(id.clone()).or_default();
+                (s.ddc_gains, s.ddc_gains_max) = (Some(base.original), Some(base.max));
+                self.save();
+            }
+            if self
+                .color
+                .on_gains(&id, matches!(event, DdcEvent::GainsReady(_)))
+            {
+                self.color_replan(false);
             }
             self.update_settings();
             return;
@@ -700,7 +713,7 @@ impl App {
             DdcEvent::Unresponsive => m.health = Health::Unresponsive,
             DdcEvent::ReadOnly => m.health = Health::ReadOnly,
             #[cfg(feature = "plus")]
-            DdcEvent::GainsReady | DdcEvent::GainsUnavailable => {}
+            DdcEvent::GainsReady(_) | DdcEvent::GainsUnavailable => {}
         }
         self.refresh(i);
     }
@@ -1141,7 +1154,7 @@ impl App {
             #[cfg(feature = "plus")]
             auto::TIMER_SENSOR => self.auto_sensor_settled(),
             #[cfg(feature = "plus")]
-            auto::TIMER_COLOR => self.color_replan(),
+            auto::TIMER_COLOR => self.color_replan(false),
             _ => {}
         }
     }
@@ -1465,7 +1478,7 @@ impl App {
         self.save();
         // Automation settings (or limits, ranges) may have changed: apply them now.
         #[cfg(feature = "plus")]
-        self.auto_replan();
+        self.replan(true);
         self.update_settings();
     }
 
@@ -1477,7 +1490,19 @@ impl App {
         match edit {
             MonitorEdit::Color(color) => self.set_color(i, color),
             #[cfg(feature = "plus")]
-            MonitorEdit::ColorMethod(method) => entry.color_method = method,
+            MonitorEdit::ColorMethod(method) => {
+                entry.color_method = method;
+                if method == ColorMethodPref::Ddc {
+                    let ddc = self.monitors[i].worker.as_ref();
+                    self.color.select_hardware(id, ddc);
+                }
+            }
+            #[cfg(feature = "plus")]
+            MonitorEdit::RestoreColors => {
+                entry.color_method = ColorMethodPref::Gamma;
+                let ddc = self.monitors[i].worker.as_ref();
+                self.color.restore_monitor(id, ddc);
+            }
             MonitorEdit::Alias(alias) => {
                 entry.alias = alias.clone();
                 self.monitors[i].row.alias = alias;
@@ -1527,7 +1552,7 @@ impl App {
             #[cfg(feature = "plus")]
             ID_AUTO_TOGGLE => {
                 self.auto.toggle_pause();
-                self.auto_replan();
+                self.replan(true);
             }
             ID_AUTOSTART => {
                 let _ = autostart::set(!autostart::is_enabled());
@@ -1665,6 +1690,12 @@ impl App {
     /// automatic changes: they are not user overrides). Also the hook that makes settings
     /// edits (`config.auto`) take effect: `on_settings` calls it after saving.
     fn auto_replan(&mut self) {
+        self.replan(false);
+    }
+
+    /// `auto_replan`, for a change the user just made (`user`): the monitors' gains take it
+    /// at once instead of at the pace that spares their memory.
+    fn replan(&mut self, user: bool) {
         let views: Vec<MonitorView> = self
             .monitors
             .iter()
@@ -1683,12 +1714,12 @@ impl App {
         for (i, value) in self.auto.plan(&self.config, &views) {
             self.set_value(i, BrightnessOp::Set(value));
         }
-        self.color_replan();
+        self.color_replan(user);
     }
 
     /// Plan the colour temperature (once the first probe is done). Pausing automation or
     /// switching it off puts the colors back to neutral.
-    fn color_replan(&mut self) {
+    fn color_replan(&mut self, user: bool) {
         if !self.probe_done {
             return;
         }
@@ -1696,6 +1727,7 @@ impl App {
             &self.config,
             &color_views(&self.monitors, &self.config),
             self.auto.pause_until(),
+            user,
         );
     }
 
@@ -1722,7 +1754,7 @@ impl App {
             self.config.auto.manual_kelvin = (kelvin < MAX_K).then_some(kelvin as u16);
             self.save();
         }
-        self.color_replan();
+        self.color_replan(true);
     }
 
     /// A change from the Settings window; `on_settings` saves and replans afterwards.
@@ -1807,6 +1839,16 @@ fn color_views<'a>(monitors: &'a [Monitor], config: &Config) -> Vec<auto::ColorV
                 .unwrap_or_default(),
         })
         .collect()
+}
+
+/// The monitor's own gains saved in the config, if both they and their maxima are there.
+#[cfg(feature = "plus")]
+fn stored_gains(config: &Config, id: &str) -> Option<GainBaseline> {
+    let s = config.monitors.get(id)?;
+    Some(GainBaseline {
+        original: s.ddc_gains?,
+        max: s.ddc_gains_max?,
+    })
 }
 
 /// Warmest temperature the sliders accept.
@@ -2072,7 +2114,7 @@ unsafe extern "system" fn wnd_proc(
         #[cfg(feature = "plus")]
         auto::WM_APP_AUTO_COLOR => {
             with_app(|a| {
-                a.color_replan();
+                a.color_replan(false);
                 a.update_settings();
             });
         }
