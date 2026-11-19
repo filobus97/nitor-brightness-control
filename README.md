@@ -102,6 +102,12 @@ The platform-independent logic (CLI grammar, config, colors, write throttling) b
 
 Bump `version` in `Cargo.toml` and merge to `main`: CI publishes `vX.Y.Z` automatically when that release doesn't exist yet (a matching pushed tag, or **Run workflow** with **release** ticked, also work). CI builds both exes and publishes them with `SHA256SUMS.txt`; running copies of Nitor pick the new version up through their update check.
 
+## Support
+
+Nitor is free and open source. If it's useful to you, you can support me and this project on Ko-fi; it is entirely optional. Nitor shows a small, occasional reminder about this, which you can turn off in Settings (`support_reminders = false`).
+
+[![Support me on Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/pippo97)
+
 ## License
 
 [GPL-3.0-or-later](LICENSE). Nitor is inspired by ClickMonitorDDC, [Twinkle Tray](https://github.com/xanderfrangos/twinkle-tray) and [Monitorian](https://github.com/emoacht/Monitorian), but shares no code with them.

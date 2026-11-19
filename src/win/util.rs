@@ -11,7 +11,10 @@ use windows::Win32::Globalization::{
 };
 use windows::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole};
 use windows::Win32::System::Threading::{GetCurrentProcess, SetProcessWorkingSetSize};
-use windows::Win32::UI::Shell::ShellExecuteW;
+use windows::Win32::System::WindowsProgramming::QueryUnbiasedInterruptTime;
+use windows::Win32::UI::Shell::{
+    QUNS_ACCEPTS_NOTIFICATIONS, SHQueryUserNotificationState, ShellExecuteW,
+};
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 use windows::core::{PCWSTR, PWSTR};
 
@@ -99,6 +102,20 @@ pub fn open_with_default_app(path: &Path) {
 /// Open a web page in the default browser.
 pub fn open_url(url: &str) {
     shell_open(url);
+}
+
+/// Time the PC has been awake since boot, in 100 ns units (sleep and hibernation excluded).
+pub fn awake_time() -> u64 {
+    let mut t = 0u64;
+    // SAFETY: `t` is a valid out-pointer.
+    let _ = unsafe { QueryUnbiasedInterruptTime(&mut t) };
+    t
+}
+
+/// Whether Windows would show a notification now (not fullscreen, presentation, quiet time).
+pub fn accepts_notifications() -> bool {
+    // SAFETY: no pointers involved.
+    unsafe { SHQueryUserNotificationState() }.is_ok_and(|s| s == QUNS_ACCEPTS_NOTIFICATIONS)
 }
 
 fn shell_open(target: &str) {

@@ -210,6 +210,7 @@ pub enum Action {
     WriteInterval(u32),
     OpenConfig,
     OpenLog,
+    SupportReminders(bool),
     /// A monitor, by stable ID.
     Monitor(String, MonitorEdit),
     #[cfg(feature = "plus")]
@@ -376,6 +377,7 @@ enum Toggle {
     Internal,
     Updates,
     RefreshOnOpen,
+    SupportReminders,
     /// "Show in tray" of monitor `i`.
     Shown(usize),
 }
@@ -400,6 +402,7 @@ enum Btn {
     Install,
     OpenConfig,
     OpenLog,
+    Kofi,
     /// The color dot of monitor `i`: opens its palette.
     Color(usize),
     Up(usize),
@@ -847,6 +850,13 @@ impl State {
                 None,
             );
         }
+        b.button_row(
+            Btn::Kofi,
+            90.0,
+            t(Key::SupportTitle),
+            Some(t(Key::SupportCaption)),
+        );
+        b.toggle_row(Toggle::SupportReminders, t(Key::LblSupportReminders), None);
         b.end_card(SECTION_GAP);
 
         b.heading(Key::SecTray);
@@ -1109,6 +1119,7 @@ impl State {
             Toggle::Internal => g.internal_display,
             Toggle::Updates => g.check_updates,
             Toggle::RefreshOnOpen => g.refresh_on_open,
+            Toggle::SupportReminders => g.support_reminders,
             Toggle::Shown(i) => !self.mon_settings(i).hidden,
         }
     }
@@ -1171,6 +1182,7 @@ impl State {
                     Toggle::Internal => Action::InternalDisplay(on),
                     Toggle::Updates => Action::CheckUpdates(on),
                     Toggle::RefreshOnOpen => Action::RefreshOnOpen(on),
+                    Toggle::SupportReminders => Action::SupportReminders(on),
                     Toggle::Shown(i) => self.monitor_action(i, MonitorEdit::Shown(on))?,
                 })
             }
@@ -1200,6 +1212,10 @@ impl State {
                 Btn::Install => Some(Action::Install),
                 Btn::OpenConfig => Some(Action::OpenConfig),
                 Btn::OpenLog => Some(Action::OpenLog),
+                Btn::Kofi => {
+                    util::open_url(crate::support::KOFI_URL);
+                    None
+                }
                 Btn::Color(i) => {
                     let id = self.snap.monitors.get(i)?.id.clone();
                     self.picker = if self.picker.as_ref() == Some(&id) {
@@ -1955,6 +1971,7 @@ impl State {
                 let key = match b {
                     Btn::CheckNow => Key::BtnCheckNow,
                     Btn::Install => Key::BtnInstall,
+                    Btn::Kofi => Key::BtnKofi,
                     _ => Key::BtnOpen,
                 };
                 self.draw_button(cv, r, tr(self.lang(), key), hot);

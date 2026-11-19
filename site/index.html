@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Nitor Brightness Control</title>
+<meta name="description" content="Brightness for every monitor, right in your Windows tray. Tiny, portable, no install.">
+<link rel="icon" href="nitor.png">
+<style>
+:root{
+  --bg:#f6f7f9; --surface:#ffffff; --text:#1b1f24; --muted:#5b6470; --line:#e3e6ea;
+  --navy:#1c2736; --blue:#378add; --amber:#f2a72b; --ok:#1d9e75;
+}
+@media (prefers-color-scheme: dark){
+  :root{ --bg:#0f141b; --surface:#171e28; --text:#e8ecf1; --muted:#9aa4b2; --line:#263040; }
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;background:var(--bg);color:var(--text);
+  font:16px/1.55 "Segoe UI Variable","Segoe UI",system-ui,-apple-system,sans-serif}
+a{color:inherit}
+.wrap{max-width:960px;margin:0 auto;padding:0 20px}
+
+/* header */
+header{padding:56px 0 40px;text-align:center}
+.logo{width:88px;height:88px}
+h1{font-size:clamp(28px,5vw,42px);margin:14px 0 6px;letter-spacing:-.02em}
+.tag{color:var(--muted);font-size:clamp(16px,2.4vw,19px);margin:0 0 26px}
+.actions{display:flex;gap:12px;justify-content:center;flex-wrap:wrap}
+.btn{display:inline-flex;align-items:center;gap:8px;padding:11px 22px;border-radius:10px;
+  text-decoration:none;font-weight:600;border:1px solid transparent}
+.btn.primary{background:var(--blue);color:#fff}
+.btn.primary:hover{filter:brightness(1.08)}
+.btn.ghost{border-color:var(--line);background:var(--surface)}
+.btn.ghost:hover{border-color:var(--muted)}
+
+/* taskbar mock */
+.tray{margin:36px auto 0;display:inline-flex;align-items:center;gap:14px;padding:10px 18px;
+  background:#202020;border-radius:12px;box-shadow:0 10px 30px rgba(0,0,0,.25);color:#fff}
+.tray .n{font:600 20px/1 "Bahnschrift","Segoe UI",sans-serif;letter-spacing:-.03em}
+.tray .sep{width:1px;height:22px;background:#3a3a3a}
+.tray .clock{font-size:12px;line-height:1.2;text-align:right;color:#ddd}
+.tray .hint{font-size:12px;color:#bbb}
+
+/* editions */
+h2{font-size:26px;margin:0 0 8px;letter-spacing:-.01em}
+.sub{color:var(--muted);margin:0 0 24px}
+section{padding:40px 0}
+.cards{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:16px;padding:24px}
+.card.plus{border-top:4px solid var(--amber)} .card.base{border-top:4px solid var(--blue)}
+.card .head{display:flex;align-items:center;gap:12px;margin-bottom:6px}
+.card img{width:44px;height:44px}
+.card h3{margin:0;font-size:21px}
+.card p{color:var(--muted);margin:4px 0 14px}
+.card ul{margin:0;padding:0;list-style:none}
+.card li{padding:7px 0;border-top:1px solid var(--line)}
+.card li b{display:block}
+.card li span{color:var(--muted);font-size:14px}
+
+/* table */
+table{width:100%;border-collapse:collapse;background:var(--surface);border:1px solid var(--line);
+  border-radius:14px;overflow:hidden}
+th,td{padding:11px 14px;text-align:left;border-top:1px solid var(--line);vertical-align:top}
+thead th{border-top:0;font-size:14px;color:var(--muted);font-weight:600}
+td.c,th.c{text-align:center;width:110px}
+td small{display:block;color:var(--muted);font-size:13px}
+.yes{color:var(--ok);font-weight:700} .no{color:var(--muted)}
+tr.group td{background:var(--bg);font-weight:600;font-size:13px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em}
+
+/* downloads */
+.dl{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+.dl .card{text-align:center}
+.dl .btn{width:100%;justify-content:center;margin:10px 0 8px;padding:14px}
+.btn.amber{background:var(--amber);color:#1b1f24}
+.small{font-size:14px;color:var(--muted)}
+.notes{margin-top:22px;display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+.note{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:14px 16px;font-size:14px;color:var(--muted)}
+.note b{color:var(--text);display:block;margin-bottom:2px}
+
+footer{padding:36px 0 50px;color:var(--muted);font-size:14px;text-align:center;border-top:1px solid var(--line);margin-top:20px}
+footer a{color:var(--muted)}
+
+@media (max-width:720px){
+  .cards,.dl,.notes{grid-template-columns:1fr}
+  td.c,th.c{width:70px}
+  .tray .hint{display:none}
+}
+</style>
+</head>
+<body>
+
+<header class="wrap">
+  <img class="logo" src="nitor.png" alt="">
+  <h1>Nitor Brightness Control</h1>
+  <p class="tag">Brightness for every monitor, right in your tray.<br>Tiny, portable, no install.</p>
+  <div class="actions">
+    <a class="btn primary" href="#download">Download</a>
+    <a class="btn ghost" href="https://github.com/filobus97/nitor-brightness-controll">View on GitHub</a>
+    <a class="btn ghost" href="https://ko-fi.com/pippo97" rel="noopener">&#9829; Support on Ko-fi</a>
+  </div>
+  <div class="tray" aria-hidden="true">
+    <span class="hint">scroll to adjust →</span>
+    <span class="n" style="color:#5fa6ea">80</span>
+    <span class="n" style="color:#e57a55">65</span>
+    <span class="n" style="color:#3cc596">100</span>
+    <span class="sep"></span>
+    <span class="clock">21:47<br>19/11/2026</span>
+  </div>
+</header>
+
+<main class="wrap">
+
+<section id="editions">
+  <h2>Two editions, one app</h2>
+  <p class="sub">Same codebase, same settings file. Switch any time.</p>
+  <div class="cards">
+    <div class="card base">
+      <div class="head"><img src="nitor.png" alt=""><h3>Nitor</h3></div>
+      <p>Everything you need to control your monitors' brightness.</p>
+      <ul>
+        <li><b>Brightness at a glance</b><span>Every monitor gets its own tray icon showing its brightness</span></li>
+        <li><b>Scroll to adjust</b><span>Hover an icon and scroll — no clicking, no menus</span></li>
+        <li><b>Matched screens</b><span>One slider for all monitors, calibrated to look equally bright</span></li>
+        <li><b>Featherweight</b><span>One small exe, no install, ~0% CPU when idle</span></li>
+        <li><b>Private by design</b><span>No account, no tracking, no telemetry</span></li>
+      </ul>
+    </div>
+    <div class="card plus">
+      <div class="head"><img src="nitor-plus.png" alt=""><h3>Nitor Plus</h3></div>
+      <p>Nitor, plus automatic brightness and color temperature.</p>
+      <ul>
+        <li><b>Everything in Nitor</b><span>Same tray icons, panel and settings</span></li>
+        <li><b>Follows the sun</b><span>Brightness rises and falls with daylight where you live</span></li>
+        <li><b>Reads the room</b><span>Uses your laptop's light sensor to match the light around you</span></li>
+        <li><b>Warm evenings</b><span>Warmer colors after sunset for easier late-night viewing</span></li>
+        <li><b>You stay in charge</b><span>Any manual change pauses automation until the next sunrise or sunset</span></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section id="compare">
+  <h2>Compare</h2>
+  <p class="sub">Pick Nitor for simple manual control, Nitor Plus if you want it to adjust itself.</p>
+  <table>
+    <thead><tr><th>Feature</th><th class="c">Nitor</th><th class="c">Nitor Plus</th></tr></thead>
+    <tbody>
+      <tr class="group"><td colspan="3">Control</td></tr>
+      <tr><td>Brightness at a glance<small>A tray icon per monitor with its live brightness</small></td><td class="c yes">✓</td><td class="c yes">✓</td></tr>
+      <tr><td>Scroll to adjust<small>Hover an icon and scroll</small></td><td class="c yes">✓</td><td class="c yes">✓</td></tr>
+      <tr><td>One panel for all screens<small>A slider per monitor, in that monitor's color</small></td><td class="c yes">✓</td><td class="c yes">✓</td></tr>
+      <tr><td>Matched screens<small>Link all monitors to one calibrated slider</small></td><td class="c yes">✓</td><td class="c yes">✓</td></tr>
+      <tr><td>Laptop screen too<small>Optional control of the built-in display</small></td><td class="c yes">✓</td><td class="c yes">✓</td></tr>
+      <tr><td>Keyboard and command line<small>Script it: <code>Nitor.exe Dell b +10</code></small></td><td class="c yes">✓</td><td class="c yes">✓</td></tr>
+      <tr class="group"><td colspan="3">Automation</td></tr>
+      <tr><td>Follows the sun<small>Brightness follows daylight at your location</small></td><td class="c no">—</td><td class="c yes">✓</td></tr>
+      <tr><td>Reads the room<small>Uses the laptop's ambient light sensor</small></td><td class="c no">—</td><td class="c yes">✓</td></tr>
+      <tr><td>Warm evenings<small>Color temperature by software or by the monitor itself</small></td><td class="c no">—</td><td class="c yes">✓</td></tr>
+      <tr><td>Cloudy-day aware<small>Dims slightly on overcast days (opt-in)</small></td><td class="c no">—</td><td class="c yes">✓</td></tr>
+      <tr class="group"><td colspan="3">Everyday</td></tr>
+      <tr><td>Starts with Windows<small>Silently in the tray</small></td><td class="c yes">✓</td><td class="c yes">✓</td></tr>
+      <tr><td>Always up to date<small>Updates itself in place, on your click</small></td><td class="c yes">✓</td><td class="c yes">✓</td></tr>
+      <tr><td>Featherweight<small>Single portable exe, ~0% CPU when idle</small></td><td class="c">~0.7 MB</td><td class="c">~0.8 MB</td></tr>
+      <tr><td>Private by design<small>No account, no tracking, no telemetry</small></td><td class="c yes">✓</td><td class="c yes">✓</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section id="download">
+  <h2>Download <span class="small" id="ver"></span></h2>
+  <p class="sub">Windows 10 and 11. No installer: download and run.</p>
+  <div class="dl">
+    <div class="card base">
+      <div class="head" style="justify-content:center"><img src="nitor.png" alt=""><h3>Nitor</h3></div>
+      <a class="btn primary" href="https://github.com/filobus97/nitor-brightness-controll/releases/latest/download/Nitor-x64.exe">Download for Windows (x64)</a>
+      <div class="small">ARM PC (Snapdragon)? <a href="https://github.com/filobus97/nitor-brightness-controll/releases/latest/download/Nitor-arm64.exe">Download ARM64</a></div>
+    </div>
+    <div class="card plus">
+      <div class="head" style="justify-content:center"><img src="nitor-plus.png" alt=""><h3>Nitor Plus</h3></div>
+      <a class="btn amber" href="https://github.com/filobus97/nitor-brightness-controll/releases/latest/download/NitorPlus-x64.exe">Download for Windows (x64)</a>
+      <div class="small">ARM PC (Snapdragon)? <a href="https://github.com/filobus97/nitor-brightness-controll/releases/latest/download/NitorPlus-arm64.exe">Download ARM64</a></div>
+    </div>
+  </div>
+  <div class="notes">
+    <div class="note"><b>Which one?</b>Most PCs need x64. Not sure? Settings → System → About → System type.</div>
+    <div class="note"><b>First launch</b>Windows SmartScreen may warn about a new app: More info → Run anyway.</div>
+    <div class="note"><b>Verify</b><a href="https://github.com/filobus97/nitor-brightness-controll/releases/latest/download/SHA256SUMS.txt">SHA-256 checksums</a> · <a href="https://github.com/filobus97/nitor-brightness-controll/releases">All releases</a></div>
+  </div>
+</section>
+
+</main>
+
+<footer class="wrap">
+  Nitor is free and open source under the <a href="https://github.com/filobus97/nitor-brightness-controll/blob/main/LICENSE">GPL-3.0</a> ·
+  <a href="https://github.com/filobus97/nitor-brightness-controll">GitHub</a> ·
+  <a href="https://ko-fi.com/pippo97" rel="noopener">Support me and this project on Ko-fi</a><br>
+  No telemetry. The network is used only for update checks and the opt-in weather.
+</footer>
+
+<script>
+// Show the current version next to "Download" (optional; the links work without it).
+fetch("https://api.github.com/repos/filobus97/nitor-brightness-controll/releases/latest")
+  .then(r => r.ok ? r.json() : null)
+  .then(d => { if (d && d.tag_name) document.getElementById("ver").textContent = d.tag_name; })
+  .catch(() => {});
+</script>
+</body>
+</html>

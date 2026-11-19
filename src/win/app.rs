@@ -14,6 +14,7 @@ use super::icon::{self, IconContent, IconRenderer, IconSpec, OwnedIcon};
 use super::instance::{self, WINDOW_CLASS};
 use super::monitors::{self, FoundMonitor};
 use super::settings::{self, MonitorEdit, MonitorInfo, MonitorState, Snapshot, UpdateStatus};
+use super::support;
 use super::theme::{self, Theme};
 use super::tray::{self, TrayEvent, WM_APP_TRAY};
 use super::update::{self as updater, InstallError};
@@ -54,12 +55,13 @@ use windows::Win32::UI::Shell::{NIN_SELECT, NINF_KEY};
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, CreateWindowExW, DEVICE_NOTIFY_WINDOW_HANDLE, DefWindowProcW,
     DestroyMenu, DispatchMessageW, GetCursorPos, GetMessageW, KillTimer, MENU_ITEM_FLAGS,
-    MF_CHECKED, MF_SEPARATOR, MF_STRING, MSG, PBT_APMRESUMEAUTOMATIC, PBT_POWERSETTINGCHANGE,
-    PostMessageW, PostQuitMessage, RegisterClassExW, RegisterWindowMessageW, SetForegroundWindow,
-    SetMenuDefaultItem, SetTimer, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage,
-    WM_APP, WM_CLOSE, WM_CONTEXTMENU, WM_COPYDATA, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED,
-    WM_MOUSEMOVE, WM_NULL, WM_POWERBROADCAST, WM_SETTINGCHANGE, WM_SYSCOLORCHANGE, WM_THEMECHANGED,
-    WM_TIMER, WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_POPUP,
+    MF_CHECKED, MF_SEPARATOR, MF_STRING, MSG, PBT_APMRESUMEAUTOMATIC, PBT_APMSUSPEND,
+    PBT_POWERSETTINGCHANGE, PostMessageW, PostQuitMessage, RegisterClassExW,
+    RegisterWindowMessageW, SetForegroundWindow, SetMenuDefaultItem, SetTimer, TPM_RETURNCMD,
+    TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WM_APP, WM_CLOSE, WM_CONTEXTMENU,
+    WM_COPYDATA, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_MOUSEMOVE, WM_NULL,
+    WM_POWERBROADCAST, WM_SETTINGCHANGE, WM_SYSCOLORCHANGE, WM_THEMECHANGED, WM_TIMER, WNDCLASSEXW,
+    WS_EX_TOOLWINDOW, WS_POPUP,
 };
 use windows::core::{PCWSTR, w};
 
@@ -442,6 +444,8 @@ struct App {
     update_status: UpdateStatus,
     /// The check of this launch has started (later ones follow the 24 h cadence).
     launch_checked: bool,
+    /// `util::awake_time` at the last usage sample (kept to whole minutes, see `count_usage`).
+    awake_mark: u64,
     /// Automatic re-scans done since the last manual rescan or successful probe.
     retry_step: usize,
     /// Nitor Plus automation engine.
@@ -530,11 +534,70 @@ impl App {
             update_status: UpdateStatus::Idle,
             launch_checked: false,
             retry_step: 0,
+            awake_mark: util::awake_time(),
             #[cfg(feature = "plus")]
             auto: auto::Engine::new(hwnd),
             #[cfg(feature = "plus")]
             color: auto::ColorEngine::new(hwnd),
         }
+    }
+
+    /// Add the awake minutes since the last sample to `usage_minutes` (saved only when it
+    /// changed). There is deliberately no timer for this: it is called from events that
+    /// happen anyway (the hourly update tick, suspend/resume, probe completion, opening the
+    /// flyout or Settings, shutdown), so it adds no CPU load or wake-ups; a reminder may
+    /// therefore come a little after its threshold.
+    fn count_usage(&mut self) {
+        let (minutes, mark) = crate::support::take_minutes(self.awake_mark, util::awake_time());
+        self.awake_mark = mark;
+        if minutes > 0 {
+            self.config.general.usage_minutes += minutes;
+            self.save();
+        }
+    }
+
+    /// Count usage, then show the support reminder if it is due, Windows accepts
+    /// notifications now (else the next event tries again) and no popup is open.
+    fn support_check(&mut self) {
+        self.count_usage();
+        let g = &self.config.general;
+        if !self.probe_done
+            || support::is_open()
+            || !crate::support::due(g.support_reminders, g.usage_minutes, g.support_next_minutes)
+            || !util::accepts_notifications()
+        {
+            return;
+        }
+        let anchor = self
+            .balloon_uid()
+            .and_then(|uid| tray::rect(self.hwnd, uid))
+            .map(|r| POINT {
+                x: (r.left + r.right) / 2,
+                y: (r.top + r.bottom) / 2,
+            });
+        if support::show(anchor, self.lang) {
+            log(&format!(
+                "support reminder: shown at {} min of use",
+                self.config.general.usage_minutes
+            ));
+        }
+    }
+
+    /// The popup closed: whatever the way, the next one is far away; "Don't remind me
+    /// again" switches the reminders off.
+    fn on_support_closed(&mut self, reason: support::Reason, dont_remind: bool) {
+        self.count_usage();
+        let g = &mut self.config.general;
+        g.support_next_minutes = crate::support::next_after(g.usage_minutes);
+        if dont_remind {
+            g.support_reminders = false;
+        }
+        log(&format!(
+            "support reminder: closed ({reason:?}){}",
+            if dont_remind { ", reminders off" } else { "" }
+        ));
+        self.save();
+        self.update_settings();
     }
 
     fn save(&self) {
@@ -743,6 +806,7 @@ impl App {
         self.update_settings();
         self.plan_retry();
         self.maybe_auto_check();
+        self.support_check();
         for cmd in std::mem::take(&mut self.initial) {
             self.exec(&cmd);
         }
@@ -1089,6 +1153,7 @@ impl App {
         if colors_changed {
             self.theme = Theme::read();
             flyout::retheme();
+            support::retheme();
             theme::set_menu_theme(self.theme.taskbar_light);
         }
         self.icon_size = icon::tray_icon_size();
@@ -1148,7 +1213,10 @@ impl App {
                 }
                 self.scan();
             }
-            TIMER_UPDATE => self.maybe_auto_check(),
+            TIMER_UPDATE => {
+                self.support_check();
+                self.maybe_auto_check();
+            }
             #[cfg(feature = "plus")]
             auto::TIMER_AUTO => self.auto_replan(),
             #[cfg(feature = "plus")]
@@ -1261,7 +1329,8 @@ impl App {
     }
 
     /// Left click on a tray icon: close the flyout if open, else open it at `anchor`.
-    fn toggle_flyout(&self, anchor: POINT) {
+    fn toggle_flyout(&mut self, anchor: POINT) {
+        self.count_usage();
         if flyout::is_visible() {
             flyout::hide();
         } else if self.monitors.iter().any(|m| m.row.active) {
@@ -1354,6 +1423,7 @@ impl App {
 
     /// Open the Settings window (or bring it to the front).
     fn open_settings(&mut self) {
+        self.count_usage();
         settings::open(self.settings_snapshot());
     }
 
@@ -1463,6 +1533,7 @@ impl App {
             }
             A::WheelStep(step) => self.config.general.wheel_step = step,
             A::RefreshOnOpen(on) => self.config.general.refresh_on_open = on,
+            A::SupportReminders(on) => self.config.general.support_reminders = on,
             A::WriteInterval(ms) => {
                 self.config.general.write_interval_ms = ms;
                 let interval = Duration::from_millis(ms.into());
@@ -1677,6 +1748,11 @@ impl App {
 
     /// `WM_DESTROY`: remove icons, stop workers, save.
     fn shutdown(&mut self) {
+        self.count_usage();
+        if support::close() {
+            let g = &mut self.config.general;
+            g.support_next_minutes = crate::support::next_after(g.usage_minutes);
+        }
         self.clear();
         self.config.general.detection_in_progress.clear();
         self.save();
@@ -1903,6 +1979,11 @@ fn on_settings_action(action: settings::Action) {
     with_app(|a| a.on_settings(action));
 }
 
+/// Called by the support popup's window procedure (the app is not borrowed there).
+fn on_support_closed(reason: support::Reason, dont_remind: bool) {
+    with_app(|a| a.on_support_closed(reason, dont_remind));
+}
+
 fn on_tray(hwnd: HWND, ev: TrayEvent) {
     match ev.msg {
         WM_MOUSEMOVE => {
@@ -2027,8 +2108,13 @@ fn show_menu(hwnd: HWND, x: i32, y: i32, state: &MenuState) -> u32 {
 /// `WM_POWERBROADCAST`: resume and display on/off.
 fn on_power(wparam: WPARAM, lparam: LPARAM) {
     match wparam.0 as u32 {
+        PBT_APMSUSPEND => {
+            // Close the awake-time sample before the PC sleeps.
+            with_app(App::count_usage);
+        }
         PBT_APMRESUMEAUTOMATIC => {
             with_app(|a| {
+                a.support_check();
                 #[cfg(feature = "plus")]
                 a.auto.resume();
                 a.rescan_soon();
@@ -2223,6 +2309,7 @@ pub fn run(config_path: PathBuf, initial: Vec<Command>, updated: bool, autostart
     theme::init_menus(hwnd, Theme::read().taskbar_light);
     flyout::init(on_flyout_action);
     settings::init(on_settings_action);
+    support::init(on_support_closed);
     // SAFETY: valid window handle and GUID; the notification ends with the window.
     unsafe {
         let _ = RegisterPowerSettingNotification(

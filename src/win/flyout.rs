@@ -49,9 +49,9 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, HWND_TOPMOST, IDC_ARROW,
     LoadCursorW, RegisterClassExW, SWP_NOACTIVATE, SWP_NOZORDER, SWP_SHOWWINDOW,
-    SetForegroundWindow, SetWindowPos, WA_INACTIVE, WM_ACTIVATE, WM_CAPTURECHANGED, WM_DPICHANGED,
-    WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT,
-    WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    SetForegroundWindow, SetWindowPos, WA_INACTIVE, WINDOW_EX_STYLE, WM_ACTIVATE,
+    WM_CAPTURECHANGED, WM_DPICHANGED, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 use windows::core::{HRESULT, HSTRING, PCWSTR, w};
 use windows_numerics::Vector2;
@@ -238,27 +238,27 @@ const D2DERR_RECREATE_TARGET: HRESULT = HRESULT(0x8899000Cu32 as i32);
 const REOPEN_GUARD: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Copy, Default)]
-struct Rect {
-    l: f32,
-    t: f32,
-    r: f32,
-    b: f32,
+pub(super) struct Rect {
+    pub(super) l: f32,
+    pub(super) t: f32,
+    pub(super) r: f32,
+    pub(super) b: f32,
 }
 
 impl Rect {
-    fn new(l: f32, t: f32, r: f32, b: f32) -> Rect {
+    pub(super) fn new(l: f32, t: f32, r: f32, b: f32) -> Rect {
         Rect { l, t, r, b }
     }
     fn centered(cx: f32, cy: f32, w: f32, h: f32) -> Rect {
         Rect::new(cx - w / 2.0, cy - h / 2.0, cx + w / 2.0, cy + h / 2.0)
     }
-    fn contains(&self, x: f32, y: f32) -> bool {
+    pub(super) fn contains(&self, x: f32, y: f32) -> bool {
         x >= self.l && x < self.r && y >= self.t && y < self.b
     }
-    fn cy(&self) -> f32 {
+    pub(super) fn cy(&self) -> f32 {
         (self.t + self.b) / 2.0
     }
-    fn d2d(&self) -> D2D_RECT_F {
+    pub(super) fn d2d(&self) -> D2D_RECT_F {
         D2D_RECT_F {
             left: self.l,
             top: self.t,
@@ -415,16 +415,16 @@ impl Layout {
 // Colors
 // ---------------------------------------------------------------------------
 
-struct Colors {
+pub(super) struct Colors {
     /// Background tint: translucent over the acrylic, opaque otherwise.
-    bg: (Rgb, f32),
+    pub(super) bg: (Rgb, f32),
     /// Black overlay of the footer band.
-    footer: f32,
-    text: Rgb,
+    pub(super) footer: f32,
+    pub(super) text: Rgb,
     thumb: Rgb,
 }
 
-fn colors(light: bool, acrylic: bool) -> Colors {
+pub(super) fn colors(light: bool, acrylic: bool) -> Colors {
     let (bg, text, thumb, footer) = if light {
         (
             Rgb::new(0xF9, 0xF9, 0xF9),
@@ -474,9 +474,9 @@ struct Fonts {
     glyph: IDWriteTextFormat,
 }
 
-struct Target {
-    rt: ID2D1HwndRenderTarget,
-    brush: ID2D1SolidColorBrush,
+pub(super) struct Target {
+    pub(super) rt: ID2D1HwndRenderTarget,
+    pub(super) brush: ID2D1SolidColorBrush,
 }
 
 struct State {
@@ -1058,7 +1058,7 @@ fn ellipse(cx: f32, cy: f32, r: f32) -> D2D1_ELLIPSE {
     }
 }
 
-fn rounded(r: Rect, radius: f32) -> D2D1_ROUNDED_RECT {
+pub(super) fn rounded(r: Rect, radius: f32) -> D2D1_ROUNDED_RECT {
     D2D1_ROUNDED_RECT {
         rect: r.d2d(),
         radiusX: radius,
@@ -1275,6 +1275,43 @@ impl Canvas<'_> {
     }
 }
 
+/// A render target for `hwnd` (premultiplied alpha when the acrylic backdrop shows through).
+pub(super) fn make_target(
+    d2d: &ID2D1Factory,
+    hwnd: HWND,
+    acrylic: bool,
+    size: D2D_SIZE_U,
+) -> Option<Target> {
+    let props = D2D1_RENDER_TARGET_PROPERTIES {
+        r#type: D2D1_RENDER_TARGET_TYPE_DEFAULT,
+        pixelFormat: D2D1_PIXEL_FORMAT {
+            format: DXGI_FORMAT_UNKNOWN,
+            alphaMode: if acrylic {
+                D2D1_ALPHA_MODE_PREMULTIPLIED
+            } else {
+                D2D1_ALPHA_MODE_IGNORE
+            },
+        },
+        dpiX: 96.0,
+        dpiY: 96.0,
+        usage: D2D1_RENDER_TARGET_USAGE_NONE,
+        minLevel: D2D1_FEATURE_LEVEL_DEFAULT,
+    };
+    let hwnd_props = D2D1_HWND_RENDER_TARGET_PROPERTIES {
+        hwnd,
+        pixelSize: size,
+        presentOptions: D2D1_PRESENT_OPTIONS_NONE,
+    };
+    // SAFETY: valid factory and property structs.
+    unsafe {
+        let rt = d2d.CreateHwndRenderTarget(&props, &hwnd_props).ok()?;
+        let brush = rt
+            .CreateSolidColorBrush(&color_f(Rgb::WHITE, 1.0), None)
+            .ok()?;
+        Some(Target { rt, brush })
+    }
+}
+
 impl State {
     fn ensure_fonts(&mut self) -> Option<()> {
         if self.fonts.as_ref().is_some_and(|(dpi, _)| *dpi == self.dpi) {
@@ -1338,34 +1375,7 @@ impl State {
             }
             return Some(());
         }
-        let props = D2D1_RENDER_TARGET_PROPERTIES {
-            r#type: D2D1_RENDER_TARGET_TYPE_DEFAULT,
-            pixelFormat: D2D1_PIXEL_FORMAT {
-                format: DXGI_FORMAT_UNKNOWN,
-                alphaMode: if self.acrylic {
-                    D2D1_ALPHA_MODE_PREMULTIPLIED
-                } else {
-                    D2D1_ALPHA_MODE_IGNORE
-                },
-            },
-            dpiX: 96.0,
-            dpiY: 96.0,
-            usage: D2D1_RENDER_TARGET_USAGE_NONE,
-            minLevel: D2D1_FEATURE_LEVEL_DEFAULT,
-        };
-        let hwnd_props = D2D1_HWND_RENDER_TARGET_PROPERTIES {
-            hwnd: self.hwnd,
-            pixelSize: size,
-            presentOptions: D2D1_PRESENT_OPTIONS_NONE,
-        };
-        // SAFETY: valid factory and property structs.
-        unsafe {
-            let rt = self.d2d.CreateHwndRenderTarget(&props, &hwnd_props).ok()?;
-            let brush = rt
-                .CreateSolidColorBrush(&color_f(Rgb::WHITE, 1.0), None)
-                .ok()?;
-            self.target = Some(Target { rt, brush });
-        }
+        self.target = Some(make_target(&self.d2d, self.hwnd, self.acrylic, size)?);
         Some(())
     }
 
@@ -1528,7 +1538,7 @@ impl State {
 // ---------------------------------------------------------------------------
 
 /// Set an integer DWM window attribute; whether DWM accepted it.
-fn set_dwm_int(hwnd: HWND, attr: DWMWINDOWATTRIBUTE, value: i32) -> bool {
+pub(super) fn set_dwm_int(hwnd: HWND, attr: DWMWINDOWATTRIBUTE, value: i32) -> bool {
     // SAFETY: `value` outlives the call and its size is passed.
     unsafe {
         DwmSetWindowAttribute(
@@ -1541,6 +1551,55 @@ fn set_dwm_int(hwnd: HWND, attr: DWMWINDOWATTRIBUTE, value: i32) -> bool {
     }
 }
 
+/// Create a popup window of the registered class `class`, themed like the flyout: dark/light
+/// frame and, on Windows 11, rounded corners with a transient acrylic backdrop that shows
+/// through the extended frame. If DWM rejects any of it, the caller paints an opaque
+/// background instead. Returns the window, the theme read and whether the backdrop is on.
+pub(super) fn create_window(
+    class: &[u16],
+    ex_style: WINDOW_EX_STYLE,
+) -> Option<(HWND, Theme, bool)> {
+    // SAFETY: plain Win32 creation; `class` outlives the calls that read it.
+    unsafe {
+        let hinst = HINSTANCE(GetModuleHandleW(None).ok()?.0);
+        let hwnd = CreateWindowExW(
+            ex_style,
+            PCWSTR(class.as_ptr()),
+            PCWSTR(class.as_ptr()),
+            WS_POPUP,
+            0,
+            0,
+            0,
+            0,
+            None,
+            None,
+            Some(hinst),
+            None,
+        )
+        .ok()?;
+        let theme = Theme::read();
+        set_dwm_int(
+            hwnd,
+            DWMWA_USE_IMMERSIVE_DARK_MODE,
+            i32::from(!theme.taskbar_light),
+        );
+        let acrylic = theme.is_win11
+            && set_dwm_int(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND.0)
+            && set_dwm_int(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, DWMSBT_TRANSIENTWINDOW.0)
+            && DwmExtendFrameIntoClientArea(
+                hwnd,
+                &MARGINS {
+                    cxLeftWidth: -1,
+                    cxRightWidth: -1,
+                    cyTopHeight: -1,
+                    cyBottomHeight: -1,
+                },
+            )
+            .is_ok();
+        Some((hwnd, theme, acrylic))
+    }
+}
+
 impl State {
     fn create() -> Option<State> {
         // SAFETY: plain Win32/COM creation; `class` outlives both calls that read it.
@@ -1548,45 +1607,8 @@ impl State {
             let d2d: ID2D1Factory =
                 D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None).ok()?;
             let dwrite: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED).ok()?;
-            let hinst = HINSTANCE(GetModuleHandleW(None).ok()?.0);
             let class = class_name();
-            let hwnd = CreateWindowExW(
-                WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
-                PCWSTR(class.as_ptr()),
-                PCWSTR(class.as_ptr()),
-                WS_POPUP,
-                0,
-                0,
-                0,
-                0,
-                None,
-                None,
-                Some(hinst),
-                None,
-            )
-            .ok()?;
-
-            // Windows 11: rounded corners and a transient acrylic backdrop that shows through
-            // the extended frame. If DWM rejects any of it, paint an opaque background instead.
-            let theme = Theme::read();
-            set_dwm_int(
-                hwnd,
-                DWMWA_USE_IMMERSIVE_DARK_MODE,
-                i32::from(!theme.taskbar_light),
-            );
-            let acrylic = theme.is_win11
-                && set_dwm_int(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND.0)
-                && set_dwm_int(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, DWMSBT_TRANSIENTWINDOW.0)
-                && DwmExtendFrameIntoClientArea(
-                    hwnd,
-                    &MARGINS {
-                        cxLeftWidth: -1,
-                        cxRightWidth: -1,
-                        cyTopHeight: -1,
-                        cyBottomHeight: -1,
-                    },
-                )
-                .is_ok();
+            let (hwnd, theme, acrylic) = create_window(&class, WS_EX_TOOLWINDOW | WS_EX_TOPMOST)?;
 
             let text_font = if has_family(&dwrite, "Segoe UI Variable Text") {
                 "Segoe UI Variable Text"
