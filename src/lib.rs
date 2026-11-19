@@ -15,6 +15,7 @@ pub mod i18n;
 pub mod json;
 pub mod link;
 pub mod startup;
+pub mod support;
 pub mod throttle;
 pub mod update;
 

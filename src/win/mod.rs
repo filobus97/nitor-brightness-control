@@ -2,7 +2,7 @@
 //! - `app`: UI thread, message window, glue between everything below.
 //! - `monitors` + `ddc`: discovery, identity, DDC/CI worker threads.
 //! - `icon` + `theme`: tray icon rendering and taskbar/app theme.
-//! - `flyout` + `settings`: the Direct2D flyout and the Settings window.
+//! - `flyout` + `settings` + `support`: the Direct2D flyout, the Settings window and the support reminder popup.
 //! - `http` + `update`: WinHTTP GET helper; release check and self-update.
 //! - `tray`, `wheel`, `instance`, `autostart`, `util`: small Win32 wrappers.
 
@@ -19,6 +19,7 @@ pub mod icon;
 pub mod instance;
 pub mod monitors;
 pub mod settings;
+pub mod support;
 pub mod theme;
 pub mod tray;
 pub mod update;

@@ -35,6 +35,12 @@ pub struct General {
     pub check_updates: bool,
     /// Unix seconds of the last automatic update check.
     pub last_update_check: u64,
+    /// Awake minutes Nitor has been running in total (see `support`).
+    pub usage_minutes: u64,
+    /// Show the occasional, dismissable support reminder.
+    pub support_reminders: bool,
+    /// `usage_minutes` at which the reminder is next due.
+    pub support_next_minutes: u64,
     /// Stable IDs being probed; non-empty at startup means the last probe crashed (§7.4).
     pub detection_in_progress: Vec<String>,
 }
@@ -56,6 +62,9 @@ impl Default for General {
             hint_shown: false,
             check_updates: true,
             last_update_check: 0,
+            usage_minutes: 0,
+            support_reminders: true,
+            support_next_minutes: crate::support::FIRST_MINUTES,
             detection_in_progress: Vec::new(),
         }
     }
@@ -315,6 +324,9 @@ impl Config {
         o += &format!("hint_shown = {}\n", g.hint_shown);
         o += &format!("check_updates = {}\n", g.check_updates);
         o += &format!("last_update_check = {}\n", g.last_update_check);
+        o += &format!("usage_minutes = {}\n", g.usage_minutes);
+        o += &format!("support_reminders = {}\n", g.support_reminders);
+        o += &format!("support_next_minutes = {}\n", g.support_next_minutes);
         o += &format!(
             "detection_in_progress = {}\n",
             one_line(&g.detection_in_progress.join(","))
@@ -435,6 +447,11 @@ impl General {
             "hint_shown" => self.hint_shown = parse_bool(v, d.hint_shown),
             "check_updates" => self.check_updates = parse_bool(v, d.check_updates),
             "last_update_check" => self.last_update_check = parse_num(v).unwrap_or(0),
+            "usage_minutes" => self.usage_minutes = parse_num(v).unwrap_or(0),
+            "support_reminders" => self.support_reminders = parse_bool(v, d.support_reminders),
+            "support_next_minutes" => {
+                self.support_next_minutes = parse_num(v).unwrap_or(d.support_next_minutes)
+            }
             "detection_in_progress" => {
                 self.detection_in_progress = v
                     .split(',')
@@ -622,6 +639,9 @@ mod tests {
         c.general.language = "it".into();
         c.general.check_updates = false;
         c.general.last_update_check = 1_700_000_000;
+        c.general.usage_minutes = 1234;
+        c.general.support_reminders = false;
+        c.general.support_next_minutes = 6600;
         c.general.detection_in_progress = vec!["DEL41D9-ABC#1".into(), "A&B-2".into()];
         c.auto = Auto {
             enabled: true,
@@ -685,7 +705,7 @@ mod tests {
     fn parses_spec_example_with_comments() {
         let c = Config::parse(
             "; top\n[general]\ntray_style = pill ; text | pill\nwheel_step = 99\nosd = yes\n\
-             write_interval_ms = 5\nautostart = maybe\nhint_shown = 1\ndetection_in_progress = a, b#c ,\n\
+             write_interval_ms = 5\nautostart = maybe\nhint_shown = 1\nusage_minutes = x\nsupport_reminders = maybe\nsupport_next_minutes = 77\ndetection_in_progress = a, b#c ,\n\
              [monitor.DEL41D9-ABC123]\nalias = Dell\ncolor = #378ADD ; blue\nmin = 80\nmax = 20\nbadge = D\n\
              [hotkeys]\nCtrl+Alt+PgUp = all +10\n[schedule]\n07:00 = all b 40 ; morning\n",
         );
@@ -694,6 +714,9 @@ mod tests {
         assert!(c.general.osd);
         assert!(!c.general.autostart);
         assert!(c.general.hint_shown);
+        assert_eq!(c.general.usage_minutes, 0);
+        assert!(c.general.support_reminders);
+        assert_eq!(c.general.support_next_minutes, 77);
         assert_eq!(c.general.write_interval_ms, 20);
         assert_eq!(c.general.detection_in_progress, vec!["a", "b#c"]);
         let m = &c.monitors["DEL41D9-ABC123"];
